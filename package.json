@@ -1,0 +1,31 @@
+{
+  "name": "auth_ws",
+  "version": "0.0.1",
+  "description": "API de autenticación y permisos de la plataforma multitenant",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "argon2": "^0.44.0",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.8.5",
+    "jose": "^6.2.3",
+    "pg": "^8.21.0",
+    "structure-verifier": "file:../../libs/structure-verifier"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}

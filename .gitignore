@@ -1,0 +1,25 @@
+# Dependencias
+node_modules/
+
+# Build
+dist/
+*.tsbuildinfo
+
+# Entorno (secretos: DATABASE_URL, PLATFORM_MASTER_KEY, PLATFORM_TICKET_KEY)
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Tests
+coverage/
+
+# IDE / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
