@@ -1,9 +1,11 @@
+import fastifyCookie from "@fastify/cookie";
 import Fastify from "fastify";
 import {
     serializerCompiler,
     validatorCompiler,
     type StructureVerifierTypeProvider,
 } from "structure-verifier/fastify";
+import { authV1Routes } from "./api/auth/v1/auth_v1.routes";
 import { config } from "./config";
 import { registerErrorHandler } from "./core/http/error_handler";
 
@@ -17,10 +19,11 @@ async function main(): Promise<void> {
     app.setSerializerCompiler(serializerCompiler);
     registerErrorHandler(app);
 
+    await app.register(fastifyCookie);
+
     app.get("/health", async () => ({ status: "ok" }));
 
-    // Rutas de negocio (se registran por recurso versionado):
-    // await app.register(authV1Routes);
+    await app.register(authV1Routes);
 
     await app.listen({ port: config.port, host: config.host });
 }

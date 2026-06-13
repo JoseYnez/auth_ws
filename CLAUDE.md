@@ -142,27 +142,33 @@ necesita un dato nuevo, **se crea o amplía un procedure en `db/`** (con su
 `GRANT EXECUTE` declarado junto al procedure, mismo script) — jamás se pide
 un GRANT de tabla.
 
-Procedures que consume este servicio (definidos en
+Objetos que consume este servicio (definidos en
 `db/06_auth_service_api.sql`):
 
 | Objeto | Uso |
 |---|---|
-| `auth.sp_login` | Resuelve identidad (username o email), valida lockout/4 niveles, devuelve `secret_hash` + flags 2FA/`must_change_secret` + empresas accesibles |
-| `auth.sp_register_login_attempt` | Incrementa/resetea `failed_login_attempts`, setea `locked_until_at` (umbrales por cascada §1.3 del raíz) |
-| `auth.sp_create_session` | Valida tripleta vigente, aplica `max_sessions` (revoca la más antigua), inserta sesión, devuelve TTLs + clave de firma cifrada + alias + permisos efectivos |
-| `auth.sp_refresh_session` | Rotación encadenada del refresh; **reuso de un hash ya rotado = revocar la cadena completa** |
-| `auth.sp_switch_session` | Revoca la sesión actual y crea una nueva contra la otra tripleta |
-| `auth.sp_revoke_session` | `status='inactive'` + `revoked_at` |
-| `auth.fn_get_two_factor_secret` | Secreto TOTP cifrado del usuario |
-| `auth.sp_consume_recovery_code` | Canje one-shot de código de recuperación |
-| `auth.sp_request_password_reset` | Token `password_reset` en `user_verification_tokens` (guarda solo sha256) |
-| `auth.sp_confirm_password_reset` | Valida token, fija hash nuevo, revoca todas las sesiones del usuario |
+| `auth.sp_login` | Resuelve identidad (username o email), valida lockout, devuelve `secret_hash` + flags 2FA/`must_change_secret` + empresas accesibles |
+| `auth.sp_register_login_attempt` | Registra éxito/fallo del verify argon2id; contadores y `locked_until_at` (umbrales de `core.apps` — en credenciales aún no hay cliente) |
+| `auth.sp_consume_ticket_jti` | One-shot del ticket: registra `sha256(jti)` en `user_verification_tokens` (purpose `login_ticket`); el UNIQUE rechaza el segundo canje |
+| `auth.sp_create_session` | Consume jti + valida tripleta (4 niveles) + `max_sessions` (revoca las más antiguas) + inserta sesión; devuelve payload completo |
+| `auth.sp_refresh_session` | Rotación encadenada; **reuso de hash rotado = revoca el descendiente vivo** y revalida los 4 niveles |
+| `auth.sp_switch_session` | Revoca la sesión actual (anclada por cookie) y abre una nueva contra la otra tripleta |
+| `auth.sp_revoke_session` | Logout: `status='inactive'` + `revoked_at`. Idempotente |
+| `auth.sp_change_password` | Cambio con ticket `change-password` (must_change): consume jti, fija hash, revoca sesiones vivas |
+| `auth.sp_request_password_reset` / `sp_confirm_password_reset` | Token `password_reset` (solo sha256 a BD); confirm revoca todas las sesiones |
+| `auth.sp_consume_recovery_code` | Canje one-shot de código de recuperación 2FA |
+| `auth.fn_get_two_factor_secret` | Secreto TOTP cifrado (descifrado y verificación RFC 6238 en el servicio) |
+| `auth.fn_get_accessible_tenants` | Empresas accesibles (intersección 4 niveles) — pasos 2FA/change-password |
+| `auth.fn_get_signing_key` / `fn_list_signing_keys` | Claves de firma cifradas (verificar access en switch / `/.well-known/keys`) |
 
-Convención de firma: todo procedure recibe como último parámetro
-`p_context JSONB` = `{ user_id?, session_id?, app_name, action, ip_address,
-request_id, device_identifier? }` y **setea internamente los GUCs de
-auditoría** (`PERFORM set_config('audit.user_id', …, true)`) en cuanto
-resuelve la identidad — porque en login el servicio aún no la conoce.
+(`auth.sp_open_session` y `auth.fn_build_session_payload` son internos del
+script: sin GRANT, solo invocables desde los procedures públicos.)
+
+Convención de contexto: el servicio setea los 6 GUCs en `withTransaction`;
+los SPs **añaden lo que el servicio no conoce aún** con
+`PERFORM set_config(..., true)` — `audit.user_id` al resolver la identidad
+(huevo-y-gallina del login) y `audit.user_session` al crear/rotar la sesión.
+Los resultados van por `INOUT p_result JSONB` (claves camelCase).
 
 La verificación argon2id ocurre **en Node** (la BD no tiene argon2): el SP
 entrega el `secret_hash` solo tras validar app + identidad + vigencia, y ese
@@ -271,8 +277,9 @@ por `customer_app_id`. Las claves descifradas jamás se loggean ni serializan.
 | Endpoint | Body | Respuesta |
 |---|---|---|
 | `POST /auth/login` | `{ appCode, identifier, password, deviceIdentifier, deviceName? }` | `{ kind: 'invalid' }` \| `{ kind: 'two-factor', ticket, method }` \| `{ kind: 'change-password', ticket }` \| `{ kind: 'tenants', ticket, tenants: [{id, name}] }` |
-| `POST /auth/two-factor` | `{ ticket, code }` | mismas variantes (`invalid` = código incorrecto; ticket sigue vivo) |
-| `POST /auth/sessions` | `{ ticket, customerId }` | `{ accessToken, expiresIn, user: {id, name(alias), email}, tenant, tenants, permissions: string[] }` + cookie refresh |
+| `POST /auth/two-factor` | `{ ticket, code }` | mismas variantes (`invalid` = código incorrecto; ticket sigue vivo). `code` acepta TOTP (6 dígitos) o código de recuperación |
+| `POST /auth/change-password` | `{ ticket, newPassword }` | mismas variantes: tras el cambio sigue el flujo (`two-factor` si el usuario tiene 2FA, si no `tenants`) |
+| `POST /auth/sessions` | `{ ticket, customerId }` | 200 `{ accessToken, expiresIn, user: {id, name(alias), email}, tenant, tenants, permissions: string[] }` + cookie refresh · 401 `{ error: 'invalid' }` (opaco) |
 | `POST /auth/sessions/refresh` | — (cookie) | igual que crear sesión (permisos refrescados) |
 | `POST /auth/sessions/switch` | `{ customerId }` (access vigente) | igual que crear sesión, en la nueva empresa |
 | `DELETE /auth/sessions/current` | — | 204; revoca (`inactive` + `revoked_at`) |
@@ -296,7 +303,8 @@ proceso **no arranca**.
 | `PLATFORM_MASTER_KEY` | AES-256-GCM de campos `*_encrypted` (32 bytes, base64) |
 | `PLATFORM_TICKET_KEY` | Firma del ticket de login |
 | `PORT` / `HOST` | Servicio (default 3001) |
-| `COOKIE_DOMAIN` | Dominio de la cookie de refresh |
+| `COOKIE_DOMAIN` | Dominio de la cookie de refresh (opcional) |
+| `COOKIE_SECURE` | default `true`; `false` SOLO en desarrollo local sin HTTPS |
 | `LOG_LEVEL` | pino |
 
 Secretos solo por env (o gestor de secretos del despliegue). Nunca en el

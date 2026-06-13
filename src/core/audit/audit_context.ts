@@ -19,6 +19,8 @@ export interface AuditContext {
     readonly ipAddress: string | null;
     /** request.id de Fastify: correlaciona logs ↔ audit.event_log.stack_trace. */
     readonly requestId: string;
+    /** No es GUC de auditoría: viaja a columnas user_agent de sesiones/tokens. */
+    readonly userAgent: string | null;
 }
 
 export function buildAuditContext(
@@ -32,5 +34,6 @@ export function buildAuditContext(
         action: `${req.method} ${req.routeOptions.url ?? req.url}`,
         ipAddress: req.ip ?? null,
         requestId: String(req.id),
+        userAgent: req.headers["user-agent"] ?? null,
     };
 }
