@@ -9,35 +9,35 @@ import type { SigningKey } from "./signing_keys";
 const ISSUER = "auth_ws";
 
 export interface AccessTokenClaims {
-    readonly sub: string;
-    readonly acu: string;
-    readonly customerId: string;
-    readonly appId: string;
+  readonly sub: string;
+  readonly acu: string;
+  readonly customerId: string;
+  readonly appId: string;
 }
 
 async function toSignKey(key: SigningKey) {
-    if (key.alg === "HS256") {
-        return createSecretKey(Buffer.from(key.k, "base64"));
-    }
-    return importPKCS8(key.privateKeyPem, "EdDSA");
+  if (key.alg === "HS256") {
+    return createSecretKey(Buffer.from(key.k, "base64"));
+  }
+  return importPKCS8(key.privateKeyPem, "EdDSA");
 }
 
 export async function signAccessToken(
-    claims: AccessTokenClaims,
-    key: SigningKey,
-    ttlMinutes: number,
+  claims: AccessTokenClaims,
+  key: SigningKey,
+  ttlMinutes: number,
 ): Promise<string> {
-    const jwt = new SignJWT({
-        acu: claims.acu,
-        customer_id: claims.customerId,
-        app_id: claims.appId,
-    })
-        .setProtectedHeader({ alg: key.alg, ...(key.kid ? { kid: key.kid } : {}) })
-        .setSubject(claims.sub)
-        .setIssuer(ISSUER)
-        .setIssuedAt()
-        .setExpirationTime(`${ttlMinutes}m`);
-    return jwt.sign(await toSignKey(key));
+  const jwt = new SignJWT({
+    acu: claims.acu,
+    customer_id: claims.customerId,
+    app_id: claims.appId,
+  })
+    .setProtectedHeader({ alg: key.alg, ...(key.kid ? { kid: key.kid } : {}) })
+    .setSubject(claims.sub)
+    .setIssuer(ISSUER)
+    .setIssuedAt()
+    .setExpirationTime(`${ttlMinutes}m`);
+  return jwt.sign(await toSignKey(key));
 }
 
 /**
@@ -45,53 +45,53 @@ export async function signAccessToken(
  * par cliente-app verificar después. Nunca confiar en este resultado.
  */
 export function peekAccessTokenClaims(token: string): AccessTokenClaims | null {
-    try {
-        const payload = decodeJwt(token);
-        if (
-            typeof payload.sub !== "string" ||
-            typeof payload.acu !== "string" ||
-            typeof payload.customer_id !== "string" ||
-            typeof payload.app_id !== "string"
-        ) {
-            return null;
-        }
-        return {
-            sub: payload.sub,
-            acu: payload.acu,
-            customerId: payload.customer_id,
-            appId: payload.app_id,
-        };
-    } catch {
-        return null;
+  try {
+    const payload = decodeJwt(token);
+    if (
+      typeof payload.sub !== "string" ||
+      typeof payload.acu !== "string" ||
+      typeof payload.customer_id !== "string" ||
+      typeof payload.app_id !== "string"
+    ) {
+      return null;
     }
+    return {
+      sub: payload.sub,
+      acu: payload.acu,
+      customerId: payload.customer_id,
+      appId: payload.app_id,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Verificación real (firma + exp + issuer). Devuelve null si no es válido. */
 export async function verifyAccessToken(
-    token: string,
-    key: SigningKey,
+  token: string,
+  key: SigningKey,
 ): Promise<AccessTokenClaims | null> {
-    try {
-        const verifyKey =
-            key.alg === "HS256"
-                ? createSecretKey(Buffer.from(key.k, "base64"))
-                : await importSPKI(key.publicKeyPem, "EdDSA");
-        const { payload } = await jwtVerify(token, verifyKey, { issuer: ISSUER });
-        if (
-            typeof payload.sub !== "string" ||
-            typeof payload.acu !== "string" ||
-            typeof payload.customer_id !== "string" ||
-            typeof payload.app_id !== "string"
-        ) {
-            return null;
-        }
-        return {
-            sub: payload.sub,
-            acu: payload.acu,
-            customerId: payload.customer_id,
-            appId: payload.app_id,
-        };
-    } catch {
-        return null;
+  try {
+    const verifyKey =
+      key.alg === "HS256"
+        ? createSecretKey(Buffer.from(key.k, "base64"))
+        : await importSPKI(key.publicKeyPem, "EdDSA");
+    const { payload } = await jwtVerify(token, verifyKey, { issuer: ISSUER });
+    if (
+      typeof payload.sub !== "string" ||
+      typeof payload.acu !== "string" ||
+      typeof payload.customer_id !== "string" ||
+      typeof payload.app_id !== "string"
+    ) {
+      return null;
     }
+    return {
+      sub: payload.sub,
+      acu: payload.acu,
+      customerId: payload.customer_id,
+      appId: payload.app_id,
+    };
+  } catch {
+    return null;
+  }
 }

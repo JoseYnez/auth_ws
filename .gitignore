@@ -23,3 +23,6 @@ coverage/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local development reference files (not tracked)
+API_ROUTES.md

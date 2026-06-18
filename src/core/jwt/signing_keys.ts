@@ -7,13 +7,13 @@ import { decryptJson } from "../crypto/encryption";
 //                               "publicKeyPem": "<SPKI>", "kid": "..." }
 
 export type SigningKey =
-    | { readonly alg: "HS256"; readonly k: string; readonly kid?: string }
-    | {
-          readonly alg: "EdDSA";
-          readonly privateKeyPem: string;
-          readonly publicKeyPem: string;
-          readonly kid?: string;
-      };
+  | { readonly alg: "HS256"; readonly k: string; readonly kid?: string }
+  | {
+      readonly alg: "EdDSA";
+      readonly privateKeyPem: string;
+      readonly publicKeyPem: string;
+      readonly kid?: string;
+    };
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -24,15 +24,15 @@ const cache = new Map<string, { key: SigningKey; expiresAt: number }>();
  * claves descifradas viven solo en memoria y jamás se loggean ni serializan.
  */
 export function getSigningKey(customerId: string, appId: string, encrypted: string): SigningKey {
-    const cacheId = `${customerId}:${appId}`;
-    const hit = cache.get(cacheId);
-    if (hit && hit.expiresAt > Date.now()) {
-        return hit.key;
-    }
-    const key = decryptJson<SigningKey>(encrypted);
-    if (key.alg !== "HS256" && key.alg !== "EdDSA") {
-        throw new Error("Algoritmo de clave de firma desconocido");
-    }
-    cache.set(cacheId, { key, expiresAt: Date.now() + CACHE_TTL_MS });
-    return key;
+  const cacheId = `${customerId}:${appId}`;
+  const hit = cache.get(cacheId);
+  if (hit && hit.expiresAt > Date.now()) {
+    return hit.key;
+  }
+  const key = decryptJson<SigningKey>(encrypted);
+  if (key.alg !== "HS256" && key.alg !== "EdDSA") {
+    throw new Error("Algoritmo de clave de firma desconocido");
+  }
+  cache.set(cacheId, { key, expiresAt: Date.now() + CACHE_TTL_MS });
+  return key;
 }

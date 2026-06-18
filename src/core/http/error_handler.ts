@@ -7,11 +7,11 @@ import { hasStructureVerifierValidationErrors } from "structure-verifier/fastify
  * errores de negocio NO llegan aquí: son respuestas tipadas del controller.
  */
 export function registerErrorHandler(app: FastifyInstance): void {
-    app.setErrorHandler((err, req, reply) => {
-        if (hasStructureVerifierValidationErrors(err)) {
-            return reply.status(400).send({ errors: err.validation });
-        }
-        req.log.error({ err }, "error no controlado");
-        return reply.status(500).send({ error: "internal", requestId: String(req.id) });
-    });
+  app.setErrorHandler((err, req, reply) => {
+    if (hasStructureVerifierValidationErrors(err)) {
+      return reply.status(400).send({ errors: err.validation });
+    }
+    req.log.error({ err }, "error no controlado");
+    return reply.status(500).send({ error: "internal", requestId: String(req.id) });
+  });
 }
