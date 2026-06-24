@@ -12,6 +12,9 @@ const envV = new V.ObjectNotNull({
   COOKIE_DOMAIN: new V.String(),
   // false SOLO en desarrollo local sin HTTPS
   COOKIE_SECURE: new V.BooleanNotNull({ defaultValue: true }),
+  // Lista blanca de orígenes permitidos para CORS, separados por coma.
+  // Vacío = no se permite ningún origen cruzado (mismo origen sigue funcionando).
+  CORS_ORIGINS: new V.StringNotNull({ defaultValue: "" }),
   LOG_LEVEL: new V.StringNotNull({
     defaultValue: "info",
     in: ["fatal", "error", "warn", "info", "debug", "trace"],
@@ -35,5 +38,8 @@ export const config = {
   host: env.HOST,
   cookieDomain: env.COOKIE_DOMAIN,
   cookieSecure: env.COOKIE_SECURE,
+  corsOrigins: env.CORS_ORIGINS.split(",")
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0),
   logLevel: env.LOG_LEVEL,
 } as const;

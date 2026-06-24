@@ -22,11 +22,20 @@ import type {
   switchSessionV1V,
   twoFactorV1V,
 } from "./auth_v1.verifier";
+import { extractLanguage, getMessageByCode } from "./auth_v1.messages";
 
 // Tipos del contrato §2.2 (espejo de AuthGateway en base_project)
 
 export type LoginStepResult =
-  | { kind: "invalid" }
+  | {
+      kind: "invalid";
+      message?: {
+        code: string;
+        messageForClient: string;
+        messageForDeveloper: string;
+        httpStatusCode: number;
+      };
+    }
   | { kind: "two-factor"; ticket: string; method: "totp" }
   | { kind: "change-password"; ticket: string }
   | { kind: "tenants"; ticket: string; tenants: Tenant[] };
@@ -92,6 +101,25 @@ async function buildSessionResult(
   };
 }
 
+/**
+ * Respuesta opaca del login: debe ser IDÉNTICA para credenciales inválidas,
+ * usuario inexistente, usuario bloqueado y usuario sin empresas en la app
+ * (CLAUDE.md §2 "Respuestas opacas" / §7). La presencia o ausencia del campo
+ * `message` no puede distinguir un caso de otro.
+ */
+function invalidLoginResult(language: string): LoginStepResult {
+  const msg = getMessageByCode("ERR_LOGIN_INVALID", language);
+  return {
+    kind: "invalid",
+    message: {
+      code: msg.code,
+      messageForClient: msg.messageForClient,
+      messageForDeveloper: msg.messageForDeveloper,
+      httpStatusCode: msg.httpStatusCode,
+    },
+  };
+}
+
 /** Paso siguiente tras superar credenciales / 2FA / cambio de contraseña. */
 async function nextStepTicket(
   base: Pick<TicketPayload, "userId" | "appId" | "appCode" | "deviceIdentifier" | "deviceName">,
@@ -107,6 +135,8 @@ async function nextStepTicket(
 
 export const authController = {
   async login(data: InferType<typeof loginV1V>, ctx: AuditContext): Promise<LoginStepResult> {
+    const language = extractLanguage(ctx.acceptLanguage);
+
     return withTransaction(ctx, async (tx) => {
       const row = await repo.spLogin(tx, data.appCode, data.identifier);
 
@@ -114,13 +144,13 @@ export const authController = {
         // Igualar tiempos: el "usuario no existe" no debe distinguirse
         // de "contraseña incorrecta" por la latencia.
         await verifyAgainstDummy(data.password);
-        return { kind: "invalid" };
+        return invalidLoginResult(language);
       }
 
       const verified = await verifyPassword(row.secretHash, data.password);
       await repo.spRegisterLoginAttempt(tx, row.userId, row.appId, verified);
       if (!verified) {
-        return { kind: "invalid" };
+        return invalidLoginResult(language);
       }
 
       const ticketBase = {
@@ -143,7 +173,11 @@ export const authController = {
         return { kind: "two-factor", ticket, method: "totp" };
       }
 
-      return nextStepTicket(ticketBase, row.tenants);
+      // Si no hay empresas accesibles, nextStepTicket devuelve `invalid`: se
+      // reescribe con el mismo cuerpo opaco que credencial/usuario inválido
+      // para no filtrar que la cuenta existe pero no tiene acceso.
+      const step = await nextStepTicket(ticketBase, row.tenants);
+      return step.kind === "invalid" ? invalidLoginResult(language) : step;
     });
   },
 

@@ -21,6 +21,8 @@ export interface AuditContext {
   readonly requestId: string;
   /** No es GUC de auditoría: viaja a columnas user_agent de sesiones/tokens. */
   readonly userAgent: string | null;
+  /** Accept-Language header para resolución de mensajes internacionalizados. */
+  readonly acceptLanguage: string | undefined;
 }
 
 export function buildAuditContext(
@@ -35,5 +37,6 @@ export function buildAuditContext(
     ipAddress: req.ip ?? null,
     requestId: String(req.id),
     userAgent: req.headers["user-agent"] ?? null,
+    acceptLanguage: req.headers["accept-language"],
   };
 }
