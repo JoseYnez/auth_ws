@@ -1,20 +1,21 @@
 /**
- * seed-login.ts — Bootstrap de un usuario admin FUNCIONAL para probar el login.
+ * seed-login.ts — Rellena SOLO la crypto de runtime sobre el esqueleto que ya
+ * sembró `init.sql` (99_seed_bootstrap.sql). No crea estructura.
  *
- * El `init.sql` siembra el usuario `system` (sin contraseña), el cliente `demo`
- * y la app `admin-app`, pero NO crea lo que el login necesita: credencial
- * argon2id, contratación con clave de firma, membresía, tripleta ni rol. Eso
- * exige crypto de runtime (argon2id + clave Ed25519 cifrada con el master key),
- * por lo que vive aquí y no en SQL puro.
+ * `init.sql` siembra TODO el esqueleto: usuario `system` (actor de auditoría,
+ * sin login), usuario `admin` (login), app `admin-app`, las empresas base
+ * (`base`, `acme`), y por cada empresa la membresía + contratación (SIN clave de
+ * firma) + tripleta + rol superadmin. Lo único que falta es lo que exige crypto
+ * de runtime y NO sale en SQL puro:
  *
- * Qué crea (idempotente — re-ejecutable sin romper):
- *   1. auth.users               → usuario admin (user_type='admin')
- *   2. auth.user_credentials    → contraseña argon2id (must_change=false)
- *   3. core.customer_apps       → contrata admin-app para `demo` + clave EdDSA
- *                                 (privada cifrada con PLATFORM_MASTER_KEY)
- *   4. core.customer_users      → membresía usuario↔cliente
- *   5. auth.app_customer_users  → la tripleta (cliente, app, usuario), alias
- *   6. auth.app_customer_user_roles → rol superadmin (platform_only, all perms)
+ *   A. auth.user_credentials                                  → hash argon2id
+ *   B. core.customer_apps.access_token_signing_key_encrypted  → blob AES-256-GCM
+ *      (UNA clave Ed25519 privada cifrada por par cliente↔app — §5.1)
+ *
+ * Este script rellena A y B. NO crea usuarios, empresas ni tripletas: si el
+ * esqueleto no existe, falla pidiendo correr init.sql. Es idempotente sobre la
+ * crypto: re-ejecutar reescribe la contraseña y NO pisa una clave de firma ya
+ * presente (solo rellena las que estén en NULL) para no invalidar tokens vivos.
  *
  * USO:
  *   ADMIN_DATABASE_URL="postgresql://postgres:...@localhost:5432/<db>" \
@@ -22,11 +23,11 @@
  *
  *   ADMIN_DATABASE_URL debe ser un superusuario (o un rol LOGIN miembro de
  *   role_owner): role_auth_service (DATABASE_URL) NO tiene privilegios de
- *   INSERT sobre las tablas de identidad.
+ *   escritura sobre las tablas de identidad.
  *
  * Configurable por env (con defaults):
- *   SEED_ADMIN_USERNAME (admin)  SEED_ADMIN_EMAIL (admin@demo.local)
- *   SEED_ADMIN_PASSWORD (Admin123!)  SEED_CUSTOMER (demo)  SEED_APP_CODE (admin-app)
+ *   SEED_ADMIN_USERNAME (admin)   SEED_ADMIN_PASSWORD (Admin123!)
+ *   SEED_APP_CODE (admin-app)
  */
 
 import "dotenv/config";
@@ -37,92 +38,67 @@ import { encryptJson } from "../src/core/crypto/encryption";
 
 const ADMIN_DSN = process.env.ADMIN_DATABASE_URL;
 const USERNAME = process.env.SEED_ADMIN_USERNAME ?? "admin";
-const EMAIL = process.env.SEED_ADMIN_EMAIL ?? "admin@demo.local";
 const PASSWORD = process.env.SEED_ADMIN_PASSWORD ?? "Admin123!";
-const CUSTOMER_NAME = process.env.SEED_CUSTOMER ?? "demo";
 const APP_CODE = process.env.SEED_APP_CODE ?? "admin-app";
-const ALIAS = process.env.SEED_ADMIN_ALIAS ?? "Admin";
-const FULL_NAME = process.env.SEED_ADMIN_FULL_NAME ?? "Admin Demo";
 
-async function main(): Promise<void> {
-  if (!ADMIN_DSN) {
-    throw new Error(
-      "Falta ADMIN_DATABASE_URL (DSN de superusuario o rol miembro de role_owner). " +
-        "DATABASE_URL usa role_auth_service, que no tiene privilegios de INSERT.",
-    );
-  }
-
-  // Crypto de runtime: hash de contraseña y clave de firma del par cliente-app.
-  const secretHash = await hashPassword(PASSWORD);
-
+/** Genera un blob cifrado nuevo con una clave Ed25519 fresca (par cliente-app). */
+function newSigningKeyEncrypted(): string {
   // admin-app firma con Ed25519 (consola admin, decisión #14/§5.1): privada en
   // PKCS8, pública en SPKI, ambas dentro del blob cifrado con el master key.
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const signingKeyEncrypted = encryptJson({
+  return encryptJson({
     alg: "EdDSA",
     privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
     publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
     kid: randomUUID(),
   });
+}
+
+async function main(): Promise<void> {
+  if (!ADMIN_DSN) {
+    throw new Error(
+      "Falta ADMIN_DATABASE_URL (DSN de superusuario o rol miembro de role_owner). " +
+        "DATABASE_URL usa role_auth_service, que no tiene privilegios de escritura.",
+    );
+  }
+
+  // Crypto de runtime: hash de contraseña (el de la firma se genera por par).
+  const secretHash = await hashPassword(PASSWORD);
 
   const client = new Client({ connectionString: ADMIN_DSN });
   await client.connect();
 
   try {
     await client.query("BEGIN");
-    // Dueño de los objetos: bypassa RLS e inserta en tablas de identidad.
+    // Dueño de los objetos: bypassa RLS y escribe en tablas de identidad.
     await client.query("SET ROLE role_owner");
     await client.query("SELECT set_config('audit.app_name', 'bootstrap', true)");
     await client.query("SELECT set_config('audit.action', 'seed_login', true)");
 
-    // --- Resolver lo que ya sembró init.sql ---------------------------------
+    // --- Resolver lo que ya sembró init.sql --------------------------------
     const systemId = await scalar(
       client,
       "SELECT id FROM auth.users WHERE username = 'system' AND status = 'active'",
       [],
       "No existe el usuario 'system'. Corre init.sql primero.",
     );
-    // A partir de aquí toda escritura se atribuye al usuario system (staff):
-    // necesario para crear un user_type='admin' y asignar un rol platform_only.
+    // Toda escritura se atribuye al usuario system (staff de plataforma).
     await client.query("SELECT set_config('audit.user_id', $1, true)", [systemId]);
 
-    const customerId = await scalar(
+    const userId = await scalar(
       client,
-      "SELECT id FROM core.customers WHERE name = $1 AND status <> 'deleted'",
-      [CUSTOMER_NAME],
-      `No existe el cliente '${CUSTOMER_NAME}'.`,
+      "SELECT id FROM auth.users WHERE username = $1 AND status <> 'deleted'",
+      [USERNAME],
+      `No existe el usuario de login '${USERNAME}'. Corre init.sql primero.`,
     );
     const appId = await scalar(
       client,
       "SELECT id FROM core.apps WHERE code = $1 AND status <> 'deleted'",
       [APP_CODE],
-      `No existe la app '${APP_CODE}'.`,
-    );
-    const roleId = await scalar(
-      client,
-      "SELECT id FROM auth.roles WHERE app_id = $1 AND scope = 'platform_only' AND code = 'superadmin' AND status <> 'deleted'",
-      [appId],
-      "No existe el rol superadmin de la app (¿falló el trigger de seed?).",
+      `No existe la app '${APP_CODE}'. Corre init.sql primero.`,
     );
 
-    // --- 1) Usuario admin (idempotente por username) ------------------------
-    let userId = await maybeScalar(
-      client,
-      "SELECT id FROM auth.users WHERE username = $1 AND status <> 'deleted'",
-      [USERNAME],
-    );
-    if (userId === null) {
-      userId = await scalar(
-        client,
-        `INSERT INTO auth.users (username, email, full_name, user_type, email_verified_at, verified_at)
-         VALUES ($1, $2, $3, 'admin', now(), now())
-         RETURNING id`,
-        [USERNAME, EMAIL, FULL_NAME],
-        "No se pudo crear el usuario admin.",
-      );
-    }
-
-    // --- 2) Credencial de contraseña (upsert de la activa) ------------------
+    // --- A) Credencial de contraseña (upsert de la activa) -----------------
     const credId = await maybeScalar(
       client,
       "SELECT id FROM auth.user_credentials WHERE user_id = $1 AND credential_type = 'password' AND status = 'active'",
@@ -140,61 +116,58 @@ async function main(): Promise<void> {
       );
     }
 
-    // --- 3) Contratación cliente↔app + clave de firma -----------------------
-    // No se pisa una clave existente (COALESCE): re-ejecutar mantiene la que ya
-    // emite tokens válidos. Si la fila no tenía clave, se rellena.
-    await client.query(
-      `INSERT INTO core.customer_apps (customer_id, app_id, access_token_signing_key_encrypted)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (customer_id, app_id) DO UPDATE
-         SET access_token_signing_key_encrypted =
-               COALESCE(core.customer_apps.access_token_signing_key_encrypted, EXCLUDED.access_token_signing_key_encrypted),
-             status = 'active'`,
-      [customerId, appId, signingKeyEncrypted],
+    // --- B) Clave de firma por par cliente↔app (solo las que falten) -------
+    // Una clave Ed25519 distinta por cada empresa accesible del usuario en la
+    // app. Solo se tocan filas con la clave en NULL: re-ejecutar conserva las
+    // que ya emiten tokens válidos.
+    const pending = await client.query<{ id: string; customer_name: string }>(
+      `SELECT ca.id, c.name AS customer_name
+         FROM core.customer_apps ca
+         JOIN core.customers c ON c.id = ca.customer_id
+         JOIN auth.app_customer_users acu
+           ON acu.customer_id = ca.customer_id AND acu.app_id = ca.app_id
+        WHERE ca.app_id = $1
+          AND acu.user_id = $2
+          AND ca.status  <> 'deleted'
+          AND acu.status <> 'deleted'
+          AND ca.access_token_signing_key_encrypted IS NULL`,
+      [appId, userId],
     );
-
-    // --- 4) Membresía usuario↔cliente ---------------------------------------
-    await client.query(
-      `INSERT INTO core.customer_users (customer_id, user_id)
-       VALUES ($1, $2)
-       ON CONFLICT (customer_id, user_id) DO UPDATE SET status = 'active'`,
-      [customerId, userId],
-    );
-
-    // --- 5) Tripleta (cliente, app, usuario) --------------------------------
-    const acuId = await scalar(
-      client,
-      `INSERT INTO auth.app_customer_users (customer_id, app_id, user_id, name)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (customer_id, app_id, user_id) DO UPDATE SET status = 'active'
-       RETURNING id`,
-      [customerId, appId, userId, ALIAS],
-      "No se pudo crear la tripleta.",
-    );
-
-    // --- 6) Rol superadmin sobre la tripleta (índice único parcial: guardado
-    // con SELECT en vez de ON CONFLICT) -------------------------------------
-    const hasRole = await maybeScalar(
-      client,
-      "SELECT id FROM auth.app_customer_user_roles WHERE app_customer_user_id = $1 AND role_id = $2 AND status <> 'deleted'",
-      [acuId, roleId],
-    );
-    if (hasRole === null) {
+    const signedCompanies: string[] = [];
+    for (const row of pending.rows) {
       await client.query(
-        "INSERT INTO auth.app_customer_user_roles (app_customer_user_id, role_id) VALUES ($1, $2)",
-        [acuId, roleId],
+        // Doble guarda IS NULL: idempotente incluso ante ejecuciones concurrentes.
+        "UPDATE core.customer_apps SET access_token_signing_key_encrypted = $2 WHERE id = $1 AND access_token_signing_key_encrypted IS NULL",
+        [row.id, newSigningKeyEncrypted()],
       );
+      signedCompanies.push(row.customer_name);
     }
+
+    // Empresas accesibles (para el resumen y para confirmar el flujo multi-empresa).
+    const tenants = await client.query<{ name: string }>(
+      `SELECT c.name
+         FROM auth.app_customer_users acu
+         JOIN core.customers c ON c.id = acu.customer_id
+        WHERE acu.user_id = $1 AND acu.app_id = $2 AND acu.status <> 'deleted'
+        ORDER BY c.name`,
+      [userId, appId],
+    );
 
     await client.query("COMMIT");
 
-    console.log("\n✅ Usuario admin listo para login:\n");
+    console.log("\n✅ Crypto de login lista:\n");
     console.log(`   appCode    : ${APP_CODE}`);
-    console.log(`   identifier : ${USERNAME}   (o ${EMAIL})`);
+    console.log(`   identifier : ${USERNAME}`);
     console.log(`   password   : ${PASSWORD}`);
-    console.log(`   empresa    : ${CUSTOMER_NAME}`);
+    console.log(`   empresas   : ${tenants.rows.map((t) => t.name).join(", ") || "(ninguna)"}`);
+    console.log(
+      `   claves     : ${signedCompanies.length} nueva(s)` +
+        (signedCompanies.length ? ` [${signedCompanies.join(", ")}]` : " (ya existían)"),
+    );
     console.log(`   rol        : superadmin (todos los permisos de la app)`);
-    console.log("\n   2FA desactivado. Flujo: credenciales → (1 empresa) → sesión.\n");
+    console.log(
+      "\n   2FA desactivado. Flujo: credenciales → selección de empresa → sesión.\n",
+    );
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
