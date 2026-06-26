@@ -1,3 +1,4 @@
+import { createPublicKey } from "node:crypto";
 import type { InferType } from "structure-verifier";
 import type { AuditContext } from "../../../core/audit/audit_context";
 import { withTransaction } from "../../../core/db/with_transaction";
@@ -9,6 +10,7 @@ import {
   peekAccessTokenClaims,
   signAccessToken,
   verifyAccessToken,
+  type VerifiedAccessToken,
 } from "../../../core/jwt/access_token";
 import { getSigningKey } from "../../../core/jwt/signing_keys";
 import { signTicket, verifyTicket, type TicketPayload } from "../../../core/jwt/ticket";
@@ -58,6 +60,35 @@ export type SessionResult =
     }
   | { ok: false };
 
+/**
+ * Clave pública Ed25519 en formato JWK (RFC 7517 / RFC 8037) para el JWKS de
+ * `/auth/.well-known/keys`. `appCode` es un miembro extra (no estándar, los
+ * consumidores lo ignoran) para que un resource server identifique su app.
+ */
+export interface JwkEd25519 {
+  kty: string;
+  crv: string;
+  x: string;
+  use: "sig";
+  alg: "EdDSA";
+  kid: string;
+  appCode: string;
+}
+
+/** Resultado de introspección de un access token (endpoint de prueba). */
+export interface AccessTokenIntrospection {
+  valid: boolean;
+  claims: {
+    sub: string;
+    acu: string;
+    customerId: string;
+    appId: string;
+    sid: string;
+    issuedAt: number;
+    expiresAt: number;
+  } | null;
+}
+
 const PASSWORD_RESET_TTL_MINUTES = 60;
 
 /**
@@ -82,6 +113,7 @@ async function buildSessionResult(
       acu: payload.acuId,
       customerId: payload.customerId,
       appId: payload.appId,
+      sid: payload.sessionId,
     },
     key,
     payload.accessTokenTtlMinutes,
@@ -365,6 +397,46 @@ export const authController = {
     await withTransaction(ctx, (tx) => repo.spRevokeSession(tx, sha256Hex(refreshToken)));
   },
 
+  /**
+   * Introspección de un access token (endpoint de prueba): verifica firma +
+   * exp + issuer contra la clave del par cliente-app de los claims — la misma
+   * validación real que aplica `switch`. Devuelve los claims si es válido.
+   * No consulta sesiones: comprueba SOLO la criptografía y vigencia del JWT.
+   */
+  async introspectAccessToken(
+    accessToken: string,
+    ctx: AuditContext,
+  ): Promise<AccessTokenIntrospection> {
+    const peeked = peekAccessTokenClaims(accessToken);
+    if (peeked === null) {
+      return { valid: false, claims: null };
+    }
+
+    return withTransaction(ctx, async (tx) => {
+      const keyEncrypted = await repo.fnGetSigningKey(tx, peeked.customerId, peeked.appId);
+      if (keyEncrypted === null) {
+        return { valid: false, claims: null };
+      }
+      const key = getSigningKey(peeked.customerId, peeked.appId, keyEncrypted);
+      const verified: VerifiedAccessToken | null = await verifyAccessToken(accessToken, key);
+      if (verified === null) {
+        return { valid: false, claims: null };
+      }
+      return {
+        valid: true,
+        claims: {
+          sub: verified.sub,
+          acu: verified.acu,
+          customerId: verified.customerId,
+          appId: verified.appId,
+          sid: verified.sid,
+          issuedAt: verified.issuedAt,
+          expiresAt: verified.expiresAt,
+        },
+      };
+    });
+  },
+
   async requestPasswordReset(
     data: InferType<typeof passwordResetRequestV1V>,
     ctx: AuditContext,
@@ -398,26 +470,41 @@ export const authController = {
     return result.ok;
   },
 
-  async listPublicKeys(ctx: AuditContext): Promise<{
-    keys: Array<{ kid: string | null; alg: "EdDSA"; publicKeyPem: string; appCode: string }>;
-  }> {
+  /**
+   * JWKS (RFC 7517) con las claves PÚBLICAS de firma de cada par cliente-app.
+   * Cualquier resource server lo cachea y valida los access tokens localmente
+   * (selección por `kid`) sin poder emitir tokens: la privada nunca sale de
+   * auth_ws. Un consumidor debe además exigir que el claim `app_id` del token
+   * sea el suyo (el JWKS es de toda la plataforma).
+   */
+  async listPublicKeys(ctx: AuditContext): Promise<{ keys: JwkEd25519[] }> {
     const rows = await withTransaction(ctx, (tx) => repo.fnListSigningKeys(tx));
-    const keys: Array<{
-      kid: string | null;
-      alg: "EdDSA";
-      publicKeyPem: string;
-      appCode: string;
-    }> = [];
+    const keys: JwkEd25519[] = [];
     for (const row of rows) {
       const key = getSigningKey(row.customerId, row.appId, row.signingKeyEncrypted);
-      if (key.alg === "EdDSA") {
-        keys.push({
-          kid: key.kid ?? null,
-          alg: "EdDSA",
-          publicKeyPem: key.publicKeyPem,
-          appCode: row.appCode,
-        });
+      if (key.kid === undefined) {
+        // Sin kid una clave no es seleccionable en un JWK Set: se omite
+        // (configuración inválida del par cliente-app, no debería ocurrir).
+        continue;
       }
+      // Node deriva el JWK Ed25519 (kty=OKP, crv=Ed25519, x) desde el SPKI.
+      const jwk = createPublicKey(key.publicKeyPem).export({ format: "jwk" }) as {
+        kty?: string;
+        crv?: string;
+        x?: string;
+      };
+      if (jwk.kty !== "OKP" || typeof jwk.crv !== "string" || typeof jwk.x !== "string") {
+        continue;
+      }
+      keys.push({
+        kty: jwk.kty,
+        crv: jwk.crv,
+        x: jwk.x,
+        use: "sig",
+        alg: "EdDSA",
+        kid: key.kid,
+        appCode: row.appCode,
+      });
     }
     return { keys };
   },

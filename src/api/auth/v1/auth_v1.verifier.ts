@@ -88,6 +88,39 @@ export const invalidResponseV1V = new V.ObjectNotNull({
   error: new V.StringNotNull(),
 });
 
+// JWKS público (GET /auth/.well-known/keys): claves públicas Ed25519 en formato
+// JWK (RFC 7517 / 8037). Se declara la respuesta para no filtrar nunca material
+// privado; `x` es la clave pública (no secreta). `appCode` es un miembro extra.
+export const jwksResponseV1V = new V.ObjectNotNull({
+  keys: new V.ArrayNotNull(
+    new V.ObjectNotNull({
+      kty: new V.StringNotNull(),
+      crv: new V.StringNotNull(),
+      x: new V.StringNotNull(),
+      use: new V.StringNotNull(),
+      alg: new V.StringNotNull(),
+      kid: new V.StringNotNull(),
+      appCode: new V.StringNotNull(),
+    }),
+  ),
+});
+
+// Introspección de access token (endpoint de prueba POST /auth/sessions/verify).
+// `claims` solo aparece cuando `valid` es true; se declara opcional para que el
+// serializer no exija el objeto en el caso inválido y nunca filtre campos extra.
+export const verifyTokenResponseV1V = new V.ObjectNotNull({
+  valid: new V.BooleanNotNull(),
+  claims: new V.Object({
+    sub: new V.UUIDNotNull(),
+    acu: new V.UUIDNotNull(),
+    customerId: new V.UUIDNotNull(),
+    appId: new V.UUIDNotNull(),
+    sid: new V.UUIDNotNull(),
+    issuedAt: new V.NumberNotNull(),
+    expiresAt: new V.NumberNotNull(),
+  }),
+});
+
 // Los endpoints con respuesta de tipo unión (login / two-factor /
 // change-password devuelven kinds distintos) no declaran response verifier:
 // structure-verifier no modela uniones discriminadas. El controller es la

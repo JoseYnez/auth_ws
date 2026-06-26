@@ -1,10 +1,12 @@
-import { createSecretKey } from "node:crypto";
 import { SignJWT, decodeJwt, importPKCS8, importSPKI, jwtVerify } from "jose";
 import type { SigningKey } from "./signing_keys";
 
 // Access token (CLAUDE.md §6): JWT corto con claims sub (user_id), acu
-// (app_customer_user_id), customer_id y app_id, firmado con la clave del par
-// cliente-app. El tenant viaja SIEMPRE como claim, nunca como parámetro.
+// (app_customer_user_id), customer_id, app_id y sid (session id), firmado con
+// la clave del par cliente-app. El tenant viaja SIEMPRE como claim, nunca como
+// parámetro. `sid` permite a los resource servers atribuir cada acción a una
+// sesión concreta en audit.event_log.app_session_id (no es enforcement de
+// revocación: el token se valida localmente sin tocar BD).
 
 const ISSUER = "auth_ws";
 
@@ -13,12 +15,17 @@ export interface AccessTokenClaims {
   readonly acu: string;
   readonly customerId: string;
   readonly appId: string;
+  /** session id = auth.app_customer_user_sessions.id (claim `sid`). */
+  readonly sid: string;
+}
+
+/** Claims verificados + marcas de tiempo (iat/exp) del propio JWT. */
+export interface VerifiedAccessToken extends AccessTokenClaims {
+  readonly issuedAt: number;
+  readonly expiresAt: number;
 }
 
 async function toSignKey(key: SigningKey) {
-  if (key.alg === "HS256") {
-    return createSecretKey(Buffer.from(key.k, "base64"));
-  }
   return importPKCS8(key.privateKeyPem, "EdDSA");
 }
 
@@ -31,6 +38,7 @@ export async function signAccessToken(
     acu: claims.acu,
     customer_id: claims.customerId,
     app_id: claims.appId,
+    sid: claims.sid,
   })
     .setProtectedHeader({ alg: key.alg, ...(key.kid ? { kid: key.kid } : {}) })
     .setSubject(claims.sub)
@@ -51,7 +59,8 @@ export function peekAccessTokenClaims(token: string): AccessTokenClaims | null {
       typeof payload.sub !== "string" ||
       typeof payload.acu !== "string" ||
       typeof payload.customer_id !== "string" ||
-      typeof payload.app_id !== "string"
+      typeof payload.app_id !== "string" ||
+      typeof payload.sid !== "string"
     ) {
       return null;
     }
@@ -60,6 +69,7 @@ export function peekAccessTokenClaims(token: string): AccessTokenClaims | null {
       acu: payload.acu,
       customerId: payload.customer_id,
       appId: payload.app_id,
+      sid: payload.sid,
     };
   } catch {
     return null;
@@ -70,18 +80,18 @@ export function peekAccessTokenClaims(token: string): AccessTokenClaims | null {
 export async function verifyAccessToken(
   token: string,
   key: SigningKey,
-): Promise<AccessTokenClaims | null> {
+): Promise<VerifiedAccessToken | null> {
   try {
-    const verifyKey =
-      key.alg === "HS256"
-        ? createSecretKey(Buffer.from(key.k, "base64"))
-        : await importSPKI(key.publicKeyPem, "EdDSA");
+    const verifyKey = await importSPKI(key.publicKeyPem, "EdDSA");
     const { payload } = await jwtVerify(token, verifyKey, { issuer: ISSUER });
     if (
       typeof payload.sub !== "string" ||
       typeof payload.acu !== "string" ||
       typeof payload.customer_id !== "string" ||
-      typeof payload.app_id !== "string"
+      typeof payload.app_id !== "string" ||
+      typeof payload.sid !== "string" ||
+      typeof payload.iat !== "number" ||
+      typeof payload.exp !== "number"
     ) {
       return null;
     }
@@ -90,6 +100,9 @@ export async function verifyAccessToken(
       acu: payload.acu,
       customerId: payload.customer_id,
       appId: payload.app_id,
+      sid: payload.sid,
+      issuedAt: payload.iat,
+      expiresAt: payload.exp,
     };
   } catch {
     return null;

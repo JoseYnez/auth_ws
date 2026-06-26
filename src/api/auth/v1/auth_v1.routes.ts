@@ -8,12 +8,14 @@ import {
   changePasswordV1V,
   createSessionV1V,
   invalidResponseV1V,
+  jwksResponseV1V,
   loginV1V,
   passwordResetConfirmV1V,
   passwordResetRequestV1V,
   sessionResponseV1V,
   switchSessionV1V,
   twoFactorV1V,
+  verifyTokenResponseV1V,
 } from "./auth_v1.verifier";
 
 // Cookie del refresh token (CLAUDE.md §6): httpOnly + Secure + SameSite=Strict,
@@ -131,6 +133,25 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
     },
   );
 
+  // Endpoint de prueba: valida un access token (Bearer) y devuelve sus claims.
+  // Responde 200 SIEMPRE — `valid: false` cuando falta el token, la firma no
+  // cuadra o está expirado; no es una frontera de seguridad, solo introspección.
+  app.post(
+    "/auth/sessions/verify",
+    { schema: { response: { 200: verifyTokenResponseV1V } } },
+    async (req, reply) => {
+      const accessToken = readBearerToken(req);
+      if (accessToken === null) {
+        return reply.code(200).send({ valid: false, claims: null });
+      }
+      const result = await authController.introspectAccessToken(
+        accessToken,
+        buildAuditContext(req),
+      );
+      return reply.code(200).send(result);
+    },
+  );
+
   app.delete("/auth/sessions/current", async (req, reply) => {
     const refreshToken = readRefreshCookie(req);
     if (refreshToken !== null) {
@@ -165,9 +186,13 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
     },
   );
 
-  app.get("/auth/.well-known/keys", async (req, reply) => {
-    const result = await authController.listPublicKeys(buildAuditContext(req));
-    // Solo claves PÚBLICAS de pares asimétricos: cacheable sin riesgo
-    return reply.header("cache-control", "public, max-age=3600").send(result);
-  });
+  app.get(
+    "/auth/.well-known/keys",
+    { schema: { response: { 200: jwksResponseV1V } } },
+    async (req, reply) => {
+      const result = await authController.listPublicKeys(buildAuditContext(req));
+      // JWKS estándar (RFC 7517): solo material PÚBLICO, cacheable sin riesgo.
+      return reply.header("cache-control", "public, max-age=3600").send(result);
+    },
+  );
 }

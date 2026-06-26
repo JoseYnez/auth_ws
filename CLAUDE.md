@@ -23,7 +23,7 @@ servicio firma ni emite tokens.
 | Validación | `structure-verifier` ≥ 1.1.x con su adaptador `structure-verifier/fastify`. Hoy instalada como `file:../../libs/structure-verifier` (la 1.1.x no está publicada en npm); al publicarla, cambiar a la versión de registro |
 | BD | `pg` (node-postgres), un solo pool, usuario **`role_auth_service`** |
 | Hash de contraseñas | **argon2id** (paquete `argon2`) |
-| JWT | `jose` (soporta EdDSA y HS256) |
+| JWT | `jose` (firma **EdDSA/Ed25519**; JWKS público en formato JWK) |
 | Cifrado en reposo | AES-256-GCM con `PLATFORM_MASTER_KEY` (env) |
 
 Servicio **stateless**: todo estado vive en la BD (o en el propio token). No
@@ -247,7 +247,7 @@ Dónde acaba cada cosa:
 
 | Token | Forma | Reglas |
 |---|---|---|
-| **Access** | JWT, TTL por cascada §1.3 | Claims: `sub` (user_id), `acu` (app_customer_user_id), `customer_id`, `app_id`, `iat`, `exp`. Firmado con la clave del par cliente-app (`customer_apps.access_token_signing_key_encrypted`, descifrada aquí). **Consola admin: Ed25519** (privada cifrada en BD; pública expuesta en `GET /auth/.well-known/keys` para que `admin_ws` valide localmente). Apps de negocio: simétrica (HS256) mientras no tengan backend propio que valide |
+| **Access** | JWT, TTL por cascada §1.3 | Claims: `sub` (user_id), `acu` (app_customer_user_id), `customer_id`, `app_id`, `sid` (`app_customer_user_sessions.id`), `iat`, `exp`. Firmado **siempre con Ed25519** con la clave del par cliente-app (`customer_apps.access_token_signing_key_encrypted`, descifrada aquí). La **privada nunca sale de `auth_ws`** (único firmador); la **pública** se publica como **JWKS** (`GET /auth/.well-known/keys`, formato JWK) para que cualquier resource server valide localmente y **no pueda emitir** (decisión #18). **No se usa HS256** (simétrica = capacidad de forjar). `sid` deja a los resource servers poblar `audit.event_log.app_session_id` (vía GUC `audit.user_session`) sin tocar BD — atribución de auditoría, no enforcement de revocación; estable entre refreshes de la misma sesión, cambia en `switch` |
 | **Refresh** | Opaco, 256 bits CSPRNG, base64url | A BD viaja **solo** `sha256(token)`. Rotación encadenada vía `previous_session_token_hash`. Reuso de hash rotado = robo → revocar cadena. Transporte: cookie `httpOnly; Secure; SameSite=Strict; Path=/auth/sessions` |
 | **Ticket** | JWT ~5 min, firmado con clave **de plataforma** (`PLATFORM_TICKET_KEY`, no de tenant) | Claims: `sub`, `app_id`, `purpose` (`tenants` \| `two-factor` \| `change-password`), `jti`. Un solo canje: el SP de canje registra/verifica el `jti`. Código 2FA incorrecto **no** invalida el ticket |
 
@@ -285,7 +285,7 @@ por `customer_app_id`. Las claves descifradas jamás se loggean ni serializan.
 | `DELETE /auth/sessions/current` | — | 204; revoca (`inactive` + `revoked_at`) |
 | `POST /auth/password-reset/request` | `{ identifier }` | 202 siempre |
 | `POST /auth/password-reset/confirm` | `{ token, newPassword }` | 204; revoca sesiones del usuario |
-| `GET /auth/.well-known/keys` | — | claves públicas activas (apps con firma asimétrica), cacheable |
+| `GET /auth/.well-known/keys` | — | **JWKS** (RFC 7517): claves públicas Ed25519 en formato JWK (`kty`/`crv`/`x`/`kid`/`alg`/`use` + `appCode`), cacheable |
 
 Cualquier cambio aquí debe reflejarse en §2.2 del CLAUDE.md raíz y en
 `base_project/src/app/core/auth/data/auth.gateway.ts` (y viceversa).
