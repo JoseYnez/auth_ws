@@ -3,7 +3,7 @@ import type { StructureVerifierTypeProvider } from "structure-verifier/fastify";
 import { config } from "../../../config";
 import { buildAuditContext } from "../../../core/audit/audit_context";
 import { authController } from "./auth_v1.controller";
-import type { SessionResult } from "./auth_v1.controller";
+import type { LoginStepResult, SessionResult } from "./auth_v1.controller";
 import {
   changePasswordV1V,
   createSessionV1V,
@@ -51,6 +51,21 @@ function readBearerToken(req: FastifyRequest): string | null {
   return header.slice("Bearer ".length);
 }
 
+/**
+ * Mapea un paso de login (login / two-factor / change-password) a HTTP. Los
+ * pasos exitosos (`two-factor`/`change-password`/`tenants`) van con 200; el
+ * `invalid` toma el `httpStatusCode` de su `message` (catálogo de mensajes:
+ * 401 credencial/ticket inválido, 429 bloqueo, 400 código 2FA…). Si no trae
+ * `message` se mantiene 200 (variante opaca sin estatus específico).
+ */
+function sendStep(reply: FastifyReply, result: LoginStepResult) {
+  const status =
+    result.kind === "invalid" && result.message !== undefined
+      ? result.message.httpStatusCode
+      : 200;
+  return reply.code(status).send(result);
+}
+
 /** Mapea el resultado de sesión: 200 + cookie, o 401 opaco + cookie limpia. */
 function sendSessionResult(reply: FastifyReply, result: SessionResult) {
   if (!result.ok) {
@@ -66,16 +81,19 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
   // que req.body se tipe por inferencia de los verifiers.
   const app = instance.withTypeProvider<StructureVerifierTypeProvider>();
 
-  app.post("/auth/login", { schema: { body: loginV1V } }, async (req) => {
-    return authController.login(req.body, buildAuditContext(req));
+  app.post("/auth/login", { schema: { body: loginV1V } }, async (req, reply) => {
+    const result = await authController.login(req.body, buildAuditContext(req));
+    return sendStep(reply, result);
   });
 
-  app.post("/auth/two-factor", { schema: { body: twoFactorV1V } }, async (req) => {
-    return authController.twoFactor(req.body, buildAuditContext(req));
+  app.post("/auth/two-factor", { schema: { body: twoFactorV1V } }, async (req, reply) => {
+    const result = await authController.twoFactor(req.body, buildAuditContext(req));
+    return sendStep(reply, result);
   });
 
-  app.post("/auth/change-password", { schema: { body: changePasswordV1V } }, async (req) => {
-    return authController.changePassword(req.body, buildAuditContext(req));
+  app.post("/auth/change-password", { schema: { body: changePasswordV1V } }, async (req, reply) => {
+    const result = await authController.changePassword(req.body, buildAuditContext(req));
+    return sendStep(reply, result);
   });
 
   app.post(

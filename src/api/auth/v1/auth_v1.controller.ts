@@ -134,13 +134,11 @@ async function buildSessionResult(
 }
 
 /**
- * Respuesta opaca del login: debe ser IDÉNTICA para credenciales inválidas,
- * usuario inexistente, usuario bloqueado y usuario sin empresas en la app
- * (CLAUDE.md §2 "Respuestas opacas" / §7). La presencia o ausencia del campo
- * `message` no puede distinguir un caso de otro.
+ * Resultado `invalid` con el `message` (y su `httpStatusCode`) resuelto desde
+ * el catálogo. La route aplica ese estatus a la respuesta HTTP (`sendStep`).
  */
-function invalidLoginResult(language: string): LoginStepResult {
-  const msg = getMessageByCode("ERR_LOGIN_INVALID", language);
+function invalidStep(code: string, language: string): LoginStepResult {
+  const msg = getMessageByCode(code, language);
   return {
     kind: "invalid",
     message: {
@@ -150,6 +148,16 @@ function invalidLoginResult(language: string): LoginStepResult {
       httpStatusCode: msg.httpStatusCode,
     },
   };
+}
+
+/**
+ * Respuesta opaca del login: debe ser IDÉNTICA para credenciales inválidas,
+ * usuario inexistente, usuario bloqueado y usuario sin empresas en la app
+ * (CLAUDE.md §2 "Respuestas opacas" / §7) — siempre `ERR_LOGIN_INVALID` (401),
+ * sin distinguir el motivo.
+ */
+function invalidLoginResult(language: string): LoginStepResult {
+  return invalidStep("ERR_LOGIN_INVALID", language);
 }
 
 /** Paso siguiente tras superar credenciales / 2FA / cambio de contraseña. */
@@ -217,9 +225,10 @@ export const authController = {
     data: InferType<typeof twoFactorV1V>,
     ctx: AuditContext,
   ): Promise<LoginStepResult> {
+    const language = extractLanguage(ctx.acceptLanguage);
     const ticket = await verifyTicket(data.ticket, "two-factor");
     if (ticket === null) {
-      return { kind: "invalid" };
+      return invalidStep("ERR_TICKET_INVALID", language);
     }
 
     return withTransaction(ctx, async (tx) => {
@@ -239,8 +248,8 @@ export const authController = {
       }
 
       if (!valid) {
-        // Código incorrecto: el ticket NO se consume — se puede reintentar
-        return { kind: "invalid" };
+        // Código incorrecto: el ticket NO se consume — se puede reintentar (400)
+        return invalidStep("ERR_2FA_INVALID_CODE", language);
       }
 
       const consumed = await repo.spConsumeTicketJti(
@@ -250,7 +259,7 @@ export const authController = {
         ticket.expiresAt,
       );
       if (!consumed.ok) {
-        return { kind: "invalid" };
+        return invalidStep("ERR_TICKET_INVALID", language);
       }
 
       const tenants = await repo.fnGetAccessibleTenants(tx, ticket.userId, ticket.appId);
@@ -262,9 +271,10 @@ export const authController = {
     data: InferType<typeof changePasswordV1V>,
     ctx: AuditContext,
   ): Promise<LoginStepResult> {
+    const language = extractLanguage(ctx.acceptLanguage);
     const ticket = await verifyTicket(data.ticket, "change-password");
     if (ticket === null) {
-      return { kind: "invalid" };
+      return invalidStep("ERR_TICKET_INVALID", language);
     }
 
     const newSecretHash = await hashPassword(data.newPassword);
@@ -278,7 +288,7 @@ export const authController = {
         newSecretHash,
       );
       if (!result.ok) {
-        return { kind: "invalid" };
+        return invalidStep("ERR_TICKET_INVALID", language);
       }
 
       if (result.twoFactorEnabled) {
