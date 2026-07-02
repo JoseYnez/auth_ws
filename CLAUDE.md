@@ -103,7 +103,7 @@ export const loginV1V = new V.ObjectNotNull({
 app.post("/auth/login", { schema: { body: loginV1V } }, async (req, reply) => {
     const ctx = buildAuditContext(req);          // §5
     const result = await authController.login(req.body, ctx);
-    return reply.code(200).send(result);         // 'invalid' también es 200 (§7)
+    return sendStep(reply, result);              // HTTP = message.httpStatusCode (§7)
 });
 
 // auth_v1.controller.ts
@@ -259,11 +259,24 @@ por `customer_app_id`. Las claves descifradas jamás se loggean ni serializan.
 
 ## 7. Respuestas y errores
 
-- **Errores de negocio esperables = respuesta tipada con HTTP 200**, nunca
-  excepción ni 4xx que filtre información. `{ kind: 'invalid' }` cubre por
-  igual: credenciales malas, usuario inexistente, usuario bloqueado, usuario
-  sin empresas en la app. Mismo cuerpo, **misma latencia aproximada**
-  (verificar argon2id contra un hash dummy cuando el usuario no existe).
+- **Errores de negocio esperables = respuesta tipada con estatus explícito**,
+  nunca excepción (decisión #19 del raíz). El estatus y los textos salen del
+  **catálogo de mensajes** (`auth_v1.messages.ts` — en código a propósito:
+  debe resolver sin BD; i18n por `Accept-Language`, hoy `en`/`es`): todo
+  `kind: 'invalid'` lleva `message = { code, messageForClient,
+  messageForDeveloper, httpStatusCode }` y la route responde con ese
+  `httpStatusCode` (`sendStep`).
+- **La opacidad la garantiza la uniformidad, no el estatus**: credenciales
+  malas, usuario inexistente, usuario bloqueado y usuario sin empresas en la
+  app devuelven el MISMO `ERR_LOGIN_INVALID` (401) con cuerpo idéntico — en
+  CUALQUIER paso del flujo (login, two-factor, change-password) — y **misma
+  latencia aproximada** (verificar argon2id contra un hash dummy cuando el
+  usuario no existe). 400 solo para el código 2FA incorrecto
+  (`ERR_2FA_INVALID_CODE`: no filtra existencia, ya exige un ticket válido);
+  401 `ERR_TICKET_INVALID` para ticket inválido/expirado. Los códigos que
+  filtrarían estado de cuenta (`ERR_LOGIN_LOCKED`, `ERR_NO_TENANTS`,
+  `ERR_TENANT_INACTIVE`) existen en el catálogo para usos internos/futuros:
+  está **prohibido** conectarlos al flujo de login.
 - `POST /auth/password-reset/request` responde **202 siempre**.
 - Errores de validación (`VerificationError` de structure-verifier) → 400
   con `{ errors: [{ instancePath, message }] }` vía el error handler global.
@@ -276,12 +289,13 @@ por `customer_app_id`. Las claves descifradas jamás se loggean ni serializan.
 
 | Endpoint | Body | Respuesta |
 |---|---|---|
-| `POST /auth/login` | `{ appCode, identifier, password, deviceIdentifier, deviceName? }` | `{ kind: 'invalid' }` \| `{ kind: 'two-factor', ticket, method }` \| `{ kind: 'change-password', ticket }` \| `{ kind: 'tenants', ticket, tenants: [{id, name}] }` |
-| `POST /auth/two-factor` | `{ ticket, code }` | mismas variantes (`invalid` = código incorrecto; ticket sigue vivo). `code` acepta TOTP (6 dígitos) o código de recuperación |
-| `POST /auth/change-password` | `{ ticket, newPassword }` | mismas variantes: tras el cambio sigue el flujo (`two-factor` si el usuario tiene 2FA, si no `tenants`) |
+| `POST /auth/login` | `{ appCode, identifier, password, deviceIdentifier, deviceName? }` | 200 `{ kind: 'two-factor', ticket, method }` \| 200 `{ kind: 'change-password', ticket }` \| 200 `{ kind: 'tenants', ticket, tenants: [{id, name}] }` \| 401 `{ kind: 'invalid', message }` (opaco) |
+| `POST /auth/two-factor` | `{ ticket, code }` | mismas variantes; `invalid` según catálogo: 400 código incorrecto (ticket sigue vivo) · 401 ticket inválido/expirado. `code` acepta TOTP (6 dígitos) o código de recuperación |
+| `POST /auth/change-password` | `{ ticket, newPassword }` | mismas variantes y estatus: tras el cambio sigue el flujo (`two-factor` si el usuario tiene 2FA, si no `tenants`) |
 | `POST /auth/sessions` | `{ ticket, customerId }` | 200 `{ accessToken, expiresIn, user: {id, name(alias), email}, tenant, tenants, permissions: string[] }` + cookie refresh · 401 `{ error: 'invalid' }` (opaco) |
 | `POST /auth/sessions/refresh` | — (cookie) | igual que crear sesión (permisos refrescados) |
 | `POST /auth/sessions/switch` | `{ customerId }` (access vigente) | igual que crear sesión, en la nueva empresa |
+| `POST /auth/sessions/verify` | — (access en `Authorization: Bearer`) | 200 SIEMPRE `{ valid, claims }` — introspección de prueba (firma + vigencia + issuer), no frontera de seguridad |
 | `DELETE /auth/sessions/current` | — | 204; revoca (`inactive` + `revoked_at`) |
 | `POST /auth/password-reset/request` | `{ identifier }` | 202 siempre |
 | `POST /auth/password-reset/confirm` | `{ token, newPassword }` | 204; revoca sesiones del usuario |

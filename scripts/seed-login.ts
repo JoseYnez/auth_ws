@@ -4,7 +4,7 @@
  *
  * `init.sql` siembra TODO el esqueleto: usuario `system` (actor de auditoría,
  * sin login), usuario `admin` (login), app `admin-app`, las empresas base
- * (`base`, `acme`), y por cada empresa la membresía + contratación (SIN clave de
+ * (`base`, `demo`), y por cada empresa la membresía + contratación (SIN clave de
  * firma) + tripleta + rol superadmin. Lo único que falta es lo que exige crypto
  * de runtime y NO sale en SQL puro:
  *

@@ -164,10 +164,12 @@ function invalidLoginResult(language: string): LoginStepResult {
 async function nextStepTicket(
   base: Pick<TicketPayload, "userId" | "appId" | "appCode" | "deviceIdentifier" | "deviceName">,
   tenants: Tenant[],
+  language: string,
 ): Promise<LoginStepResult> {
   if (tenants.length === 0) {
-    // Usuario sin empresas en la app = respuesta opaca (CLAUDE.md §7)
-    return { kind: "invalid" };
+    // Usuario sin empresas en la app = MISMO cuerpo/estatus opaco que
+    // credencial inválida, en cualquier paso del flujo (CLAUDE.md §7).
+    return invalidLoginResult(language);
   }
   const { ticket } = await signTicket({ ...base, purpose: "tenants" });
   return { kind: "tenants", ticket, tenants };
@@ -213,11 +215,7 @@ export const authController = {
         return { kind: "two-factor", ticket, method: "totp" };
       }
 
-      // Si no hay empresas accesibles, nextStepTicket devuelve `invalid`: se
-      // reescribe con el mismo cuerpo opaco que credencial/usuario inválido
-      // para no filtrar que la cuenta existe pero no tiene acceso.
-      const step = await nextStepTicket(ticketBase, row.tenants);
-      return step.kind === "invalid" ? invalidLoginResult(language) : step;
+      return nextStepTicket(ticketBase, row.tenants, language);
     });
   },
 
@@ -263,7 +261,7 @@ export const authController = {
       }
 
       const tenants = await repo.fnGetAccessibleTenants(tx, ticket.userId, ticket.appId);
-      return nextStepTicket(ticket, tenants);
+      return nextStepTicket(ticket, tenants, language);
     });
   },
 
@@ -304,7 +302,7 @@ export const authController = {
       }
 
       const tenants = await repo.fnGetAccessibleTenants(tx, ticket.userId, ticket.appId);
-      return nextStepTicket(ticket, tenants);
+      return nextStepTicket(ticket, tenants, language);
     });
   },
 

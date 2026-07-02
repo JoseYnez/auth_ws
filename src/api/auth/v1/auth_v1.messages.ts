@@ -40,6 +40,11 @@ const MESSAGES: Record<string, Record<string, MessageResponse>> = {
       messageType: "error",
     },
   },
+  // ⚠️ PROHIBIDO conectar ERR_LOGIN_LOCKED, ERR_NO_TENANTS o ERR_TENANT_INACTIVE
+  // al flujo de login/two-factor/change-password: filtrarían existencia o estado
+  // de la cuenta (CLAUDE.md §7, decisión #19). Esas causas responden SIEMPRE con
+  // ERR_LOGIN_INVALID. Existen en el catálogo para usos internos/futuros (p. ej.
+  // consola de soporte autenticada).
   ERR_LOGIN_LOCKED: {
     en: {
       code: "ERR_LOGIN_LOCKED",
