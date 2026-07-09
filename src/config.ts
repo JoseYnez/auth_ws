@@ -15,6 +15,10 @@ const envV = new V.ObjectNotNull({
   // Lista blanca de orígenes permitidos para CORS, separados por coma.
   // Vacío = no se permite ningún origen cruzado (mismo origen sigue funcionando).
   CORS_ORIGINS: new V.StringNotNull({ defaultValue: "" }),
+  // Apaga el rate limiting (solo para tests / desarrollo local). En producción
+  // debe quedar activo: es la única defensa contra credential-stuffing y
+  // fuerza bruta de TOTP a nivel de IP.
+  RATE_LIMIT_DISABLED: new V.BooleanNotNull({ defaultValue: false }),
   LOG_LEVEL: new V.StringNotNull({
     defaultValue: "info",
     in: ["fatal", "error", "warn", "info", "debug", "trace"],
@@ -41,5 +45,6 @@ export const config = {
   corsOrigins: env.CORS_ORIGINS.split(",")
     .map((o) => o.trim())
     .filter((o) => o.length > 0),
+  rateLimitDisabled: env.RATE_LIMIT_DISABLED,
   logLevel: env.LOG_LEVEL,
 } as const;

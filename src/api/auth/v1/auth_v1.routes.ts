@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { StructureVerifierTypeProvider } from "structure-verifier/fastify";
 import { config } from "../../../config";
 import { buildAuditContext } from "../../../core/audit/audit_context";
+import { rateLimit } from "../../../core/http/rate_limit";
 import { authController } from "./auth_v1.controller";
 import type { LoginStepResult, SessionResult } from "./auth_v1.controller";
 import {
@@ -81,20 +82,35 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
   // que req.body se tipe por inferencia de los verifiers.
   const app = instance.withTypeProvider<StructureVerifierTypeProvider>();
 
-  app.post("/auth/login", { schema: { body: loginV1V } }, async (req, reply) => {
-    const result = await authController.login(req.body, buildAuditContext(req));
-    return sendStep(reply, result);
-  });
+  app.post(
+    "/auth/login",
+    { schema: { body: loginV1V }, preHandler: rateLimit({ tag: "login", max: 10, windowMs: 60_000 }) },
+    async (req, reply) => {
+      const result = await authController.login(req.body, buildAuditContext(req));
+      return sendStep(reply, result);
+    },
+  );
 
-  app.post("/auth/two-factor", { schema: { body: twoFactorV1V } }, async (req, reply) => {
-    const result = await authController.twoFactor(req.body, buildAuditContext(req));
-    return sendStep(reply, result);
-  });
+  app.post(
+    "/auth/two-factor",
+    { schema: { body: twoFactorV1V }, preHandler: rateLimit({ tag: "two-factor", max: 10, windowMs: 60_000 }) },
+    async (req, reply) => {
+      const result = await authController.twoFactor(req.body, buildAuditContext(req));
+      return sendStep(reply, result);
+    },
+  );
 
-  app.post("/auth/change-password", { schema: { body: changePasswordV1V } }, async (req, reply) => {
-    const result = await authController.changePassword(req.body, buildAuditContext(req));
-    return sendStep(reply, result);
-  });
+  app.post(
+    "/auth/change-password",
+    {
+      schema: { body: changePasswordV1V },
+      preHandler: rateLimit({ tag: "change-password", max: 10, windowMs: 60_000 }),
+    },
+    async (req, reply) => {
+      const result = await authController.changePassword(req.body, buildAuditContext(req));
+      return sendStep(reply, result);
+    },
+  );
 
   app.post(
     "/auth/sessions",
@@ -181,7 +197,10 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
 
   app.post(
     "/auth/password-reset/request",
-    { schema: { body: passwordResetRequestV1V } },
+    {
+      schema: { body: passwordResetRequestV1V },
+      preHandler: rateLimit({ tag: "pwreset-request", max: 5, windowMs: 300_000 }),
+    },
     async (req, reply) => {
       const result = await authController.requestPasswordReset(req.body, buildAuditContext(req));
       if (result.issued) {
@@ -194,7 +213,10 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
 
   app.post(
     "/auth/password-reset/confirm",
-    { schema: { body: passwordResetConfirmV1V } },
+    {
+      schema: { body: passwordResetConfirmV1V },
+      preHandler: rateLimit({ tag: "pwreset-confirm", max: 10, windowMs: 300_000 }),
+    },
     async (req, reply) => {
       const ok = await authController.confirmPasswordReset(req.body, buildAuditContext(req));
       if (!ok) {

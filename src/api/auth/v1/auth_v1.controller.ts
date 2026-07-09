@@ -7,6 +7,11 @@ import { hashPassword, verifyAgainstDummy, verifyPassword } from "../../../core/
 import { generateOpaqueToken, sha256Hex } from "../../../core/crypto/token";
 import { verifyTotpCode } from "../../../core/crypto/totp";
 import {
+  clearTwoFactorAttempts,
+  isTwoFactorLocked,
+  registerFailedTwoFactor,
+} from "../../../core/security/two_factor_attempts";
+import {
   peekAccessTokenClaims,
   signAccessToken,
   verifyAccessToken,
@@ -229,6 +234,13 @@ export const authController = {
       return invalidStep("ERR_TICKET_INVALID", language);
     }
 
+    const jtiHash = sha256Hex(ticket.jti);
+    // Ticket que ya agotó sus intentos de 2FA (fuerza bruta): tratado como
+    // ticket inválido, no como código incorrecto reintentable.
+    if (isTwoFactorLocked(jtiHash)) {
+      return invalidStep("ERR_TICKET_INVALID", language);
+    }
+
     return withTransaction(ctx, async (tx) => {
       let valid = false;
 
@@ -246,20 +258,23 @@ export const authController = {
       }
 
       if (!valid) {
-        // Código incorrecto: el ticket NO se consume — se puede reintentar (400)
+        // Código incorrecto: el ticket sigue vivo y se puede reintentar (400)…
+        const { locked } = registerFailedTwoFactor(jtiHash, ticket.expiresAt);
+        if (locked) {
+          // …salvo que se alcance el umbral de intentos: se quema el jti en BD
+          // (one-shot) para invalidar el ticket también en el resto del clúster.
+          await repo.spConsumeTicketJti(tx, ticket.userId, jtiHash, ticket.expiresAt);
+          return invalidStep("ERR_TICKET_INVALID", language);
+        }
         return invalidStep("ERR_2FA_INVALID_CODE", language);
       }
 
-      const consumed = await repo.spConsumeTicketJti(
-        tx,
-        ticket.userId,
-        sha256Hex(ticket.jti),
-        ticket.expiresAt,
-      );
+      const consumed = await repo.spConsumeTicketJti(tx, ticket.userId, jtiHash, ticket.expiresAt);
       if (!consumed.ok) {
         return invalidStep("ERR_TICKET_INVALID", language);
       }
 
+      clearTwoFactorAttempts(jtiHash);
       const tenants = await repo.fnGetAccessibleTenants(tx, ticket.userId, ticket.appId);
       return nextStepTicket(ticket, tenants, language);
     });
