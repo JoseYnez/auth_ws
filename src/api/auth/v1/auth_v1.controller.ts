@@ -2,10 +2,19 @@ import { createPublicKey } from "node:crypto";
 import type { InferType } from "structure-verifier";
 import type { AuditContext } from "../../../core/audit/audit_context";
 import { withTransaction } from "../../../core/db/with_transaction";
-import { decryptText } from "../../../core/crypto/encryption";
+import { decryptText, encryptText } from "../../../core/crypto/encryption";
 import { hashPassword, verifyAgainstDummy, verifyPassword } from "../../../core/crypto/password";
+import { generateRecoveryCodes, normalizeRecoveryCode } from "../../../core/crypto/recovery_codes";
 import { generateOpaqueToken, sha256Hex } from "../../../core/crypto/token";
-import { verifyTotpCode } from "../../../core/crypto/totp";
+import {
+  buildOtpauthUri,
+  generateTotpSecretBase32,
+  verifyTotpCode,
+} from "../../../core/crypto/totp";
+import {
+  signEnrollmentTicket,
+  verifyEnrollmentTicket,
+} from "../../../core/jwt/enrollment_ticket";
 import {
   clearTwoFactorAttempts,
   isTwoFactorLocked,
@@ -23,10 +32,13 @@ import { authRepository as repo, type SessionPayloadOk, type Tenant } from "./au
 import type {
   changePasswordV1V,
   createSessionV1V,
+  invitationAcceptV1V,
   loginV1V,
   passwordResetConfirmV1V,
   passwordResetRequestV1V,
   switchSessionV1V,
+  twoFactorConfirmV1V,
+  twoFactorEnrollV1V,
   twoFactorV1V,
 } from "./auth_v1.verifier";
 import { extractLanguage, getMessageByCode } from "./auth_v1.messages";
@@ -95,6 +107,43 @@ export interface AccessTokenIntrospection {
 }
 
 const PASSWORD_RESET_TTL_MINUTES = 60;
+
+// Emisor mostrado por las apps authenticator al importar el secreto TOTP.
+const OTP_ISSUER = "Plataforma";
+
+/** Variante `invalid` con `message` garantizado (para uniones de onboarding). */
+interface InvalidResult {
+  kind: "invalid";
+  message: {
+    code: string;
+    messageForClient: string;
+    messageForDeveloper: string;
+    httpStatusCode: number;
+  };
+}
+
+export type InvitationAcceptResult =
+  | { kind: "enroll-2fa"; enrollmentTicket: string }
+  | InvalidResult;
+
+export type TwoFactorEnrollResult =
+  | { kind: "enrolled"; secret: string; otpauthUri: string; recoveryCodes: string[] }
+  | InvalidResult;
+
+export type TwoFactorConfirmResult = { kind: "done" } | InvalidResult;
+
+function invalidResult(code: string, language: string): InvalidResult {
+  const msg = getMessageByCode(code, language);
+  return {
+    kind: "invalid",
+    message: {
+      code: msg.code,
+      messageForClient: msg.messageForClient,
+      messageForDeveloper: msg.messageForDeveloper,
+      httpStatusCode: msg.httpStatusCode,
+    },
+  };
+}
 
 /**
  * Emite el access token del par cliente-app y arma la respuesta de sesión a
@@ -491,6 +540,94 @@ export const authController = {
       repo.spConfirmPasswordReset(tx, sha256Hex(data.token), newSecretHash),
     );
     return result.ok;
+  },
+
+  /**
+   * Aceptación de invitación (§4.2): fija la primera contraseña canjeando el
+   * token de invitación (one-shot) y verifica el email de paso. Emite un ticket
+   * de enrolamiento para continuar con el 2FA. Respuesta opaca en fallo.
+   */
+  async acceptInvitation(
+    data: InferType<typeof invitationAcceptV1V>,
+    ctx: AuditContext,
+  ): Promise<InvitationAcceptResult> {
+    const language = extractLanguage(ctx.acceptLanguage);
+    const newSecretHash = await hashPassword(data.newPassword);
+
+    const result = await withTransaction(ctx, (tx) =>
+      repo.spConsumeInvitationToken(tx, sha256Hex(data.token), newSecretHash),
+    );
+    if (!result.ok || result.userId === undefined || result.email === undefined) {
+      return invalidResult("ERR_INVITATION_INVALID", language);
+    }
+
+    const enrollmentTicket = await signEnrollmentTicket(result.userId, result.email);
+    return { kind: "enroll-2fa", enrollmentTicket };
+  },
+
+  /**
+   * Enrolamiento TOTP: genera y persiste (cifrado) un secreto nuevo + un lote de
+   * códigos de recuperación (hasheados). Devuelve el material a mostrar UNA vez
+   * (secreto/URI/códigos). Aún NO activa el 2FA — falta confirmar un código.
+   */
+  async enrollTwoFactor(
+    data: InferType<typeof twoFactorEnrollV1V>,
+    ctx: AuditContext,
+  ): Promise<TwoFactorEnrollResult> {
+    const language = extractLanguage(ctx.acceptLanguage);
+    const ticket = await verifyEnrollmentTicket(data.enrollmentTicket);
+    if (ticket === null) {
+      return invalidResult("ERR_ENROLLMENT_INVALID", language);
+    }
+
+    const secret = generateTotpSecretBase32();
+    const recoveryCodes = generateRecoveryCodes();
+    const recoveryHashes = recoveryCodes.map((code) => sha256Hex(normalizeRecoveryCode(code)));
+    const secretEncrypted = encryptText(secret);
+
+    const result = await withTransaction(ctx, (tx) =>
+      repo.spEnrollTwoFactor(tx, ticket.userId, secretEncrypted, recoveryHashes),
+    );
+    if (!result.ok) {
+      return invalidResult("ERR_ENROLLMENT_INVALID", language);
+    }
+
+    return {
+      kind: "enrolled",
+      secret,
+      otpauthUri: buildOtpauthUri(secret, ticket.accountName, OTP_ISSUER),
+      recoveryCodes,
+    };
+  },
+
+  /**
+   * Confirmación del enrolamiento: verifica el primer código TOTP contra el
+   * secreto pendiente y, si es válido, activa el 2FA del usuario.
+   */
+  async confirmTwoFactor(
+    data: InferType<typeof twoFactorConfirmV1V>,
+    ctx: AuditContext,
+  ): Promise<TwoFactorConfirmResult> {
+    const language = extractLanguage(ctx.acceptLanguage);
+    const ticket = await verifyEnrollmentTicket(data.enrollmentTicket);
+    if (ticket === null) {
+      return invalidResult("ERR_ENROLLMENT_INVALID", language);
+    }
+
+    return withTransaction(ctx, async (tx) => {
+      const secretEncrypted = await repo.fnGetPendingTwoFactorSecret(tx, ticket.userId);
+      if (secretEncrypted === null || !/^\d{6}$/u.test(data.code)) {
+        return invalidResult("ERR_2FA_INVALID_CODE", language);
+      }
+      if (!verifyTotpCode(decryptText(secretEncrypted), data.code)) {
+        return invalidResult("ERR_2FA_INVALID_CODE", language);
+      }
+      const activated = await repo.spActivateTwoFactor(tx, ticket.userId);
+      if (!activated.ok) {
+        return invalidResult("ERR_2FA_INVALID_CODE", language);
+      }
+      return { kind: "done" };
+    });
   },
 
   /**

@@ -62,6 +62,39 @@ export const passwordResetConfirmV1V = new V.ObjectNotNull(
   { strictMode: true },
 );
 
+// --- Onboarding: aceptación de invitación + enrolamiento de 2FA (§4.2) ---
+
+export const invitationAcceptV1V = new V.ObjectNotNull(
+  {
+    token: new V.StringNotNull({ minLength: 1, maxLength: 512 }),
+    newPassword: newPasswordV,
+  },
+  { strictMode: true },
+);
+
+export const twoFactorEnrollV1V = new V.ObjectNotNull(
+  {
+    enrollmentTicket: new V.StringNotNull({ minLength: 1, maxLength: 4096 }),
+  },
+  { strictMode: true },
+);
+
+export const twoFactorConfirmV1V = new V.ObjectNotNull(
+  {
+    enrollmentTicket: new V.StringNotNull({ minLength: 1, maxLength: 4096 }),
+    code: new V.StringNotNull({ minLength: 6, maxLength: 32 }).trim(),
+  },
+  { strictMode: true },
+);
+
+// Respuesta del paso enroll: material que se muestra UNA vez al usuario (secreto
+// base32, URI otpauth para el QR, y los códigos de recuperación crudos).
+export const twoFactorEnrollResponseV1V = new V.ObjectNotNull({
+  secret: new V.StringNotNull(),
+  otpauthUri: new V.StringNotNull(),
+  recoveryCodes: new V.ArrayNotNull(new V.StringNotNull()),
+});
+
 // Respuesta de sesión (crear / refresh / switch) — contrato §2.2 del raíz.
 // Se declara para que el serializer garantice que NUNCA se filtre un campo
 // no contratado (hashes, claves, ids internos).

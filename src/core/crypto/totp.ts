@@ -1,4 +1,5 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { URLSearchParams } from "node:url";
 
 // TOTP RFC 6238 (HMAC-SHA1, paso de 30 s, 6 dígitos) implementado con
 // node:crypto — sin dependencias. El secreto es el seed base32 estándar de
@@ -8,6 +9,24 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 const STEP_SECONDS = 30;
 const DIGITS = 6;
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function base32Encode(buffer: Buffer): string {
+  let bits = 0;
+  let value = 0;
+  let output = "";
+  for (const byte of buffer) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      output += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) {
+    output += BASE32_ALPHABET[(value << (5 - bits)) & 31];
+  }
+  return output;
+}
 
 function base32Decode(input: string): Buffer {
   const clean = input.toUpperCase().replace(/=+$/u, "").replace(/[\s-]/gu, "");
@@ -60,4 +79,33 @@ export function verifyTotpCode(secretBase32: string, code: string, window = 1): 
     }
   }
   return false;
+}
+
+/**
+ * Genera un secreto TOTP nuevo en base32 (160 bits, recomendación RFC 4226).
+ * El valor crudo se muestra al usuario una vez (QR / entrada manual) y se
+ * almacena cifrado en auth.user_two_factor_secrets.secret_encrypted.
+ */
+export function generateTotpSecretBase32(): string {
+  return base32Encode(randomBytes(20));
+}
+
+/**
+ * URI `otpauth://totp/...` estándar para que las apps authenticator importen el
+ * secreto por QR. `issuer` y `accountName` solo etiquetan la entrada.
+ */
+export function buildOtpauthUri(
+  secretBase32: string,
+  accountName: string,
+  issuer: string,
+): string {
+  const label = encodeURIComponent(`${issuer}:${accountName}`);
+  const params = new URLSearchParams({
+    secret: secretBase32,
+    issuer,
+    algorithm: "SHA1",
+    digits: String(DIGITS),
+    period: String(STEP_SECONDS),
+  });
+  return `otpauth://totp/${label}?${params.toString()}`;
 }

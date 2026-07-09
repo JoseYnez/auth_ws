@@ -93,6 +93,39 @@ const MESSAGES: Record<string, Record<string, MessageResponse>> = {
       messageType: "error",
     },
   },
+  ERR_INVITATION_INVALID: {
+    en: {
+      code: "ERR_INVITATION_INVALID",
+      messageForDeveloper: "Invitation token invalid, expired, already used, or user already has a credential",
+      messageForClient: "This invitation link is invalid or has expired. Ask for a new one",
+      httpStatusCode: 400,
+      messageType: "error",
+    },
+    es: {
+      code: "ERR_INVITATION_INVALID",
+      messageForDeveloper:
+        "Token de invitación inválido, expirado, ya usado, o el usuario ya tiene credencial",
+      messageForClient: "Esta invitación es inválida o ha expirado. Solicita una nueva",
+      httpStatusCode: 400,
+      messageType: "error",
+    },
+  },
+  ERR_ENROLLMENT_INVALID: {
+    en: {
+      code: "ERR_ENROLLMENT_INVALID",
+      messageForDeveloper: "Enrollment ticket invalid or expired",
+      messageForClient: "Your enrollment session has expired. Please start again",
+      httpStatusCode: 401,
+      messageType: "error",
+    },
+    es: {
+      code: "ERR_ENROLLMENT_INVALID",
+      messageForDeveloper: "Ticket de enrolamiento inválido o expirado",
+      messageForClient: "Tu sesión de enrolamiento ha expirado. Vuelve a empezar",
+      httpStatusCode: 401,
+      messageType: "error",
+    },
+  },
   ERR_SESSION_INVALID: {
     en: {
       code: "ERR_SESSION_INVALID",

@@ -9,12 +9,15 @@ import {
   changePasswordV1V,
   createSessionV1V,
   invalidResponseV1V,
+  invitationAcceptV1V,
   jwksResponseV1V,
   loginV1V,
   passwordResetConfirmV1V,
   passwordResetRequestV1V,
   sessionResponseV1V,
   switchSessionV1V,
+  twoFactorConfirmV1V,
+  twoFactorEnrollV1V,
   twoFactorV1V,
   verifyTokenResponseV1V,
 } from "./auth_v1.verifier";
@@ -109,6 +112,58 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const result = await authController.changePassword(req.body, buildAuditContext(req));
       return sendStep(reply, result);
+    },
+  );
+
+  // --- Onboarding: aceptación de invitación + enrolamiento de 2FA (§4.2) ---
+
+  app.post(
+    "/auth/invitation/accept",
+    {
+      schema: { body: invitationAcceptV1V },
+      preHandler: rateLimit({ tag: "invitation-accept", max: 10, windowMs: 300_000 }),
+    },
+    async (req, reply) => {
+      const result = await authController.acceptInvitation(req.body, buildAuditContext(req));
+      if (result.kind === "invalid") {
+        return reply.code(result.message.httpStatusCode).send(result);
+      }
+      return reply.code(200).send(result);
+    },
+  );
+
+  app.post(
+    "/auth/two-factor/enroll",
+    {
+      schema: { body: twoFactorEnrollV1V },
+      preHandler: rateLimit({ tag: "2fa-enroll", max: 15, windowMs: 300_000 }),
+    },
+    async (req, reply) => {
+      const result = await authController.enrollTwoFactor(req.body, buildAuditContext(req));
+      if (result.kind === "invalid") {
+        return reply.code(result.message.httpStatusCode).send(result);
+      }
+      // Solo los campos contratados (secreto/URI/códigos); no se filtra `kind`.
+      return reply.code(200).send({
+        secret: result.secret,
+        otpauthUri: result.otpauthUri,
+        recoveryCodes: result.recoveryCodes,
+      });
+    },
+  );
+
+  app.post(
+    "/auth/two-factor/confirm",
+    {
+      schema: { body: twoFactorConfirmV1V },
+      preHandler: rateLimit({ tag: "2fa-confirm", max: 10, windowMs: 60_000 }),
+    },
+    async (req, reply) => {
+      const result = await authController.confirmTwoFactor(req.body, buildAuditContext(req));
+      if (result.kind === "invalid") {
+        return reply.code(result.message.httpStatusCode).send(result);
+      }
+      return reply.code(200).send(result);
     },
   );
 

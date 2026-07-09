@@ -223,6 +223,42 @@ export const authRepository = {
     ]);
   },
 
+  spConsumeInvitationToken(
+    tx: TxClient,
+    tokenHash: string,
+    newSecretHash: string,
+  ): Promise<{ ok: boolean; reason?: string; userId?: string; email?: string; twoFactorEnabled?: boolean }> {
+    return callResult(tx, "CALL auth.sp_consume_invitation_token($1, $2, NULL)", [
+      tokenHash,
+      newSecretHash,
+    ]);
+  },
+
+  spEnrollTwoFactor(
+    tx: TxClient,
+    userId: string,
+    secretEncrypted: string,
+    recoveryCodeHashes: string[],
+  ): Promise<{ ok: boolean; reason?: string; email?: string }> {
+    return callResult(tx, "CALL auth.sp_enroll_two_factor($1, $2, $3, NULL)", [
+      userId,
+      secretEncrypted,
+      recoveryCodeHashes,
+    ]);
+  },
+
+  async fnGetPendingTwoFactorSecret(tx: TxClient, userId: string): Promise<string | null> {
+    const result = await tx.query(
+      "SELECT auth.fn_get_pending_two_factor_secret($1) AS secret",
+      [userId],
+    );
+    return (result.rows[0]?.secret as string | null) ?? null;
+  },
+
+  spActivateTwoFactor(tx: TxClient, userId: string): Promise<{ ok: boolean; reason?: string }> {
+    return callResult(tx, "CALL auth.sp_activate_two_factor($1, NULL)", [userId]);
+  },
+
   async fnGetSigningKey(tx: TxClient, customerId: string, appId: string): Promise<string | null> {
     const result = await tx.query("SELECT auth.fn_get_signing_key($1, $2) AS key", [
       customerId,
