@@ -83,7 +83,10 @@ export async function verifyAccessToken(
 ): Promise<VerifiedAccessToken | null> {
   try {
     const verifyKey = await importSPKI(key.publicKeyPem, "EdDSA");
-    const { payload } = await jwtVerify(token, verifyKey, { issuer: ISSUER });
+    const { payload } = await jwtVerify(token, verifyKey, {
+      issuer: ISSUER,
+      algorithms: ["EdDSA"],
+    });
     if (
       typeof payload.sub !== "string" ||
       typeof payload.acu !== "string" ||

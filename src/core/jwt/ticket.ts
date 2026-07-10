@@ -64,7 +64,10 @@ export async function verifyTicket(
   expectedPurpose: TicketPurpose,
 ): Promise<TicketPayload | null> {
   try {
-    const { payload } = await jwtVerify(ticket, ticketKey(), { issuer: ISSUER });
+    const { payload } = await jwtVerify(ticket, ticketKey(), {
+      issuer: ISSUER,
+      algorithms: ["HS256"],
+    });
     if (
       payload.purpose !== expectedPurpose ||
       typeof payload.sub !== "string" ||

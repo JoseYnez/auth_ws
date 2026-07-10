@@ -15,6 +15,7 @@ import {
   signEnrollmentTicket,
   verifyEnrollmentTicket,
 } from "../../../core/jwt/enrollment_ticket";
+import { buildPasswordResetEmail, getMailer } from "../../../core/mailer/mailer";
 import {
   clearTwoFactorAttempts,
   isTwoFactorLocked,
@@ -526,8 +527,16 @@ export const authController = {
       ),
     );
 
-    // TODO(mailer): enviar rawToken por email (result.email) cuando exista
-    // la integración de correo. El valor crudo NUNCA se loggea ni persiste.
+    if (result.ok && result.email !== undefined) {
+      // Fire-and-forget tras el commit: no bloquea la respuesta (siempre 202
+      // opaca) ni añade latencia al camino "cuenta existe" (anti-oráculo §7).
+      // El valor crudo del token solo viaja por el correo; nunca se persiste.
+      void getMailer()
+        .send(buildPasswordResetEmail(result.email, rawToken))
+        .catch((err: unknown) => {
+          console.error("Fallo al enviar correo de password reset:", err);
+        });
+    }
     return { issued: result.ok };
   },
 

@@ -32,7 +32,7 @@ function setRefreshCookie(reply: FastifyReply, token: string, ttlMinutes: number
   reply.setCookie(REFRESH_COOKIE, token, {
     httpOnly: true,
     secure: config.cookieSecure,
-    sameSite: "strict",
+    sameSite: config.cookieSameSite,
     path: REFRESH_COOKIE_PATH,
     maxAge: ttlMinutes * 60,
     ...(config.cookieDomain !== null ? { domain: config.cookieDomain } : {}),

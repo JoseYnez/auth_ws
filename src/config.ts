@@ -12,9 +12,25 @@ const envV = new V.ObjectNotNull({
   COOKIE_DOMAIN: new V.String(),
   // false SOLO en desarrollo local sin HTTPS
   COOKIE_SECURE: new V.BooleanNotNull({ defaultValue: true }),
+  // SameSite de la cookie de refresh. 'strict' (default, despliegue same-origin
+  // — el modelo documentado en §6). Un SPA en OTRO origen exige 'none' (+ Secure)
+  // para que el navegador mande la cookie en refresh/switch/logout cross-site;
+  // 'none' abre superficie CSRF que la rotación + CORS mitigan parcialmente.
+  COOKIE_SAMESITE: new V.StringNotNull({
+    defaultValue: "strict",
+    in: ["strict", "lax", "none"],
+  }),
   // Lista blanca de orígenes permitidos para CORS, separados por coma.
   // Vacío = no se permite ningún origen cruzado (mismo origen sigue funcionando).
   CORS_ORIGINS: new V.StringNotNull({ defaultValue: "" }),
+  // Base pública del auth_app (donde viven /reset y /invitation) para armar los
+  // enlaces de los correos. Sin barra final.
+  AUTH_APP_BASE_URL: new V.StringNotNull({ defaultValue: "http://localhost:4200" }),
+  // Remitente de los correos transaccionales.
+  MAIL_FROM: new V.StringNotNull({ defaultValue: "no-reply@localhost" }),
+  // Transporte de correo: 'console' registra el correo en el log (dev/fallback);
+  // 'smtp' queda para cablear un proveedor real (pendiente).
+  MAIL_TRANSPORT: new V.StringNotNull({ defaultValue: "console", in: ["console", "smtp"] }),
   // Apaga el rate limiting (solo para tests / desarrollo local). En producción
   // debe quedar activo: es la única defensa contra credential-stuffing y
   // fuerza bruta de TOTP a nivel de IP.
@@ -34,6 +50,22 @@ if (!result.success) {
 
 const env = result.value;
 
+// Validación de secretos criptográficos AL BOOT (§9): un valor malformado debe
+// impedir el arranque, no fallar en la primera petición. PLATFORM_MASTER_KEY es
+// la clave AES-256-GCM (32 bytes) del cifrado en reposo; PLATFORM_TICKET_KEY se
+// estira con sha256 para firmar los tickets, así que exigimos entropía mínima.
+const masterKeyBytes = Buffer.from(env.PLATFORM_MASTER_KEY, "base64");
+if (masterKeyBytes.length !== 32) {
+  console.error(
+    `PLATFORM_MASTER_KEY debe ser exactamente 32 bytes en base64 (son ${masterKeyBytes.length})`,
+  );
+  process.exit(1);
+}
+if (env.PLATFORM_TICKET_KEY.length < 32) {
+  console.error("PLATFORM_TICKET_KEY debe tener al menos 32 caracteres de entropía");
+  process.exit(1);
+}
+
 export const config = {
   databaseUrl: env.DATABASE_URL,
   platformMasterKey: env.PLATFORM_MASTER_KEY,
@@ -42,9 +74,13 @@ export const config = {
   host: env.HOST,
   cookieDomain: env.COOKIE_DOMAIN,
   cookieSecure: env.COOKIE_SECURE,
+  cookieSameSite: env.COOKIE_SAMESITE as "strict" | "lax" | "none",
   corsOrigins: env.CORS_ORIGINS.split(",")
     .map((o) => o.trim())
     .filter((o) => o.length > 0),
+  authAppBaseUrl: env.AUTH_APP_BASE_URL.replace(/\/+$/u, ""),
+  mailFrom: env.MAIL_FROM,
+  mailTransport: env.MAIL_TRANSPORT as "console" | "smtp",
   rateLimitDisabled: env.RATE_LIMIT_DISABLED,
   logLevel: env.LOG_LEVEL,
 } as const;
