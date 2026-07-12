@@ -9,7 +9,7 @@ import { generateOpaqueToken, sha256Hex } from "../../../core/crypto/token";
 import {
   buildOtpauthUri,
   generateTotpSecretBase32,
-  verifyTotpCode,
+  matchTotpStep,
 } from "../../../core/crypto/totp";
 import {
   signEnrollmentTicket,
@@ -21,6 +21,7 @@ import {
   isTwoFactorLocked,
   registerFailedTwoFactor,
 } from "../../../core/security/two_factor_attempts";
+import { tryAcceptTotpStep } from "../../../core/security/totp_replay";
 import {
   peekAccessTokenClaims,
   signAccessToken,
@@ -108,6 +109,21 @@ export interface AccessTokenIntrospection {
 }
 
 const PASSWORD_RESET_TTL_MINUTES = 60;
+
+/**
+ * Sentinel interno de `twoFactor`: aborta la transacción cuando un código de
+ * recuperación YA quedó consumido pero el canje del jti del ticket falló
+ * (ticket replayado o quemado desde otra instancia). El ROLLBACK devuelve el
+ * código de recuperación intacto — su burn solo debe COMMITear cuando todo lo
+ * demás quedó validado — y el controller responde el mismo
+ * `ERR_TICKET_INVALID` opaco que cualquier ticket inválido. No es un error de
+ * negocio hacia fuera: jamás sale del controller.
+ */
+class RecoveryCodeBurnRollback extends Error {
+  constructor() {
+    super("rollback: recovery code consumido con ticket jti ya canjeado");
+  }
+}
 
 // Emisor mostrado por las apps authenticator al importar el secreto TOTP.
 const OTP_ISSUER = "Plataforma";
@@ -291,43 +307,66 @@ export const authController = {
       return invalidStep("ERR_TICKET_INVALID", language);
     }
 
-    return withTransaction(ctx, async (tx) => {
-      let valid = false;
+    try {
+      return await withTransaction(ctx, async (tx) => {
+        let valid = false;
+        let recoveryCodeBurned = false;
 
-      if (/^\d{6}$/u.test(data.code)) {
-        const secretEncrypted = await repo.fnGetTwoFactorSecret(tx, ticket.userId);
-        if (secretEncrypted !== null) {
-          valid = verifyTotpCode(decryptText(secretEncrypted), data.code);
+        if (/^\d{6}$/u.test(data.code)) {
+          const secretEncrypted = await repo.fnGetTwoFactorSecret(tx, ticket.userId);
+          if (secretEncrypted !== null) {
+            const step = matchTotpStep(decryptText(secretEncrypted), data.code);
+            // Anti-replay (RELEASE_PLAN 5.3): un step ya aceptado para este
+            // usuario se trata como código incorrecto — respuesta opaca.
+            valid = step !== null && tryAcceptTotpStep(ticket.userId, step);
+          }
         }
-      }
 
-      if (!valid) {
-        // Código de recuperación (one-shot)
-        const recovery = await repo.spConsumeRecoveryCode(tx, ticket.userId, sha256Hex(data.code));
-        valid = recovery.ok;
-      }
+        if (!valid) {
+          // Código de recuperación (one-shot; la BD guarda sha256 del código
+          // NORMALIZADO — mayúsculas, sin guiones —, igual que el enrolamiento).
+          const recovery = await repo.spConsumeRecoveryCode(
+            tx,
+            ticket.userId,
+            sha256Hex(normalizeRecoveryCode(data.code)),
+          );
+          valid = recovery.ok;
+          recoveryCodeBurned = recovery.ok;
+        }
 
-      if (!valid) {
-        // Código incorrecto: el ticket sigue vivo y se puede reintentar (400)…
-        const { locked } = registerFailedTwoFactor(jtiHash, ticket.expiresAt);
-        if (locked) {
-          // …salvo que se alcance el umbral de intentos: se quema el jti en BD
-          // (one-shot) para invalidar el ticket también en el resto del clúster.
-          await repo.spConsumeTicketJti(tx, ticket.userId, jtiHash, ticket.expiresAt);
+        if (!valid) {
+          // Código incorrecto: el ticket sigue vivo y se puede reintentar (400)…
+          const { locked } = registerFailedTwoFactor(jtiHash, ticket.expiresAt);
+          if (locked) {
+            // …salvo que se alcance el umbral de intentos: se quema el jti en BD
+            // (one-shot) para invalidar el ticket también en el resto del clúster.
+            await repo.spConsumeTicketJti(tx, ticket.userId, jtiHash, ticket.expiresAt);
+            return invalidStep("ERR_TICKET_INVALID", language);
+          }
+          return invalidStep("ERR_2FA_INVALID_CODE", language);
+        }
+
+        const consumed = await repo.spConsumeTicketJti(tx, ticket.userId, jtiHash, ticket.expiresAt);
+        if (!consumed.ok) {
+          if (recoveryCodeBurned) {
+            // El burn del recovery code solo puede COMMITear tras validar todo
+            // lo demás: con el jti ya canjeado (replay / quemado en otra
+            // instancia) se aborta la transacción para devolver el código.
+            throw new RecoveryCodeBurnRollback();
+          }
           return invalidStep("ERR_TICKET_INVALID", language);
         }
-        return invalidStep("ERR_2FA_INVALID_CODE", language);
-      }
 
-      const consumed = await repo.spConsumeTicketJti(tx, ticket.userId, jtiHash, ticket.expiresAt);
-      if (!consumed.ok) {
+        clearTwoFactorAttempts(jtiHash);
+        const tenants = await repo.fnGetAccessibleTenants(tx, ticket.userId, ticket.appId);
+        return nextStepTicket(ticket, tenants, language);
+      });
+    } catch (err) {
+      if (err instanceof RecoveryCodeBurnRollback) {
         return invalidStep("ERR_TICKET_INVALID", language);
       }
-
-      clearTwoFactorAttempts(jtiHash);
-      const tenants = await repo.fnGetAccessibleTenants(tx, ticket.userId, ticket.appId);
-      return nextStepTicket(ticket, tenants, language);
-    });
+      throw err;
+    }
   },
 
   async changePassword(
@@ -628,7 +667,10 @@ export const authController = {
       if (secretEncrypted === null || !/^\d{6}$/u.test(data.code)) {
         return invalidResult("ERR_2FA_INVALID_CODE", language);
       }
-      if (!verifyTotpCode(decryptText(secretEncrypted), data.code)) {
+      const step = matchTotpStep(decryptText(secretEncrypted), data.code);
+      // Anti-replay: el step aceptado se registra también aquí — el primer
+      // login con 2FA no podrá reutilizar el mismo código de la confirmación.
+      if (step === null || !tryAcceptTotpStep(ticket.userId, step)) {
         return invalidResult("ERR_2FA_INVALID_CODE", language);
       }
       const activated = await repo.spActivateTwoFactor(tx, ticket.userId);

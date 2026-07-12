@@ -63,22 +63,34 @@ function hotp(secret: Buffer, counter: number): string {
 
 /**
  * Verifica un código TOTP con ventana de tolerancia ±1 paso (desfase de
- * reloj del dispositivo). Comparación en tiempo constante.
+ * reloj del dispositivo) y devuelve el time-step (contador RFC 6238) que
+ * coincidió, o `null` si ninguno. Comparación en tiempo constante. El step
+ * devuelto alimenta el anti-replay (core/security/totp_replay.ts): un mismo
+ * step no debe aceptarse dos veces para el mismo usuario.
  */
-export function verifyTotpCode(secretBase32: string, code: string, window = 1): boolean {
+export function matchTotpStep(secretBase32: string, code: string, window = 1): number | null {
   if (!/^\d{6}$/u.test(code)) {
-    return false;
+    return null;
   }
   const secret = base32Decode(secretBase32);
   const currentStep = Math.floor(Date.now() / 1000 / STEP_SECONDS);
   const codeBuffer = Buffer.from(code, "utf8");
   for (let offset = -window; offset <= window; offset++) {
-    const expected = Buffer.from(hotp(secret, currentStep + offset), "utf8");
+    const step = currentStep + offset;
+    const expected = Buffer.from(hotp(secret, step), "utf8");
     if (expected.length === codeBuffer.length && timingSafeEqual(expected, codeBuffer)) {
-      return true;
+      return step;
     }
   }
-  return false;
+  return null;
+}
+
+/**
+ * Verifica un código TOTP con ventana de tolerancia ±1 paso. Azúcar sobre
+ * `matchTotpStep` para llamadores que no necesitan el step (sin anti-replay).
+ */
+export function verifyTotpCode(secretBase32: string, code: string, window = 1): boolean {
+  return matchTotpStep(secretBase32, code, window) !== null;
 }
 
 /**
