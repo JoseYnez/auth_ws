@@ -8,8 +8,13 @@ import {
 import { authV1Routes } from "./api/auth/v1/auth_v1.routes";
 import { config } from "./config";
 import { registerErrorHandler } from "./core/http/error_handler";
+import { getMailer } from "./core/mailer/mailer";
 
 async function main(): Promise<void> {
+  // Instancia el mailer AL BOOT (no en el primer correo): con
+  // MAIL_TRANSPORT=smtp una configuración inválida debe tumbar el arranque
+  // (fail-fast §9) — los tokens de reset/invitación viajan solo por email.
+  getMailer();
   // En desarrollo usamos pino-pretty para que la línea de acceso salga limpia
   // (sin el envoltorio JSON). En producción se mantiene JSON para agregadores.
   const isProd = process.env.NODE_ENV === "production";

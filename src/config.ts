@@ -28,9 +28,20 @@ const envV = new V.ObjectNotNull({
   AUTH_APP_BASE_URL: new V.StringNotNull({ defaultValue: "http://localhost:4200" }),
   // Remitente de los correos transaccionales.
   MAIL_FROM: new V.StringNotNull({ defaultValue: "no-reply@localhost" }),
-  // Transporte de correo: 'console' registra el correo en el log (dev/fallback);
-  // 'smtp' queda para cablear un proveedor real (pendiente).
+  // Transporte de correo: 'console' registra el correo en el log (dev/fallback,
+  // default); 'smtp' envía de verdad vía nodemailer (exige SMTP_HOST — se
+  // valida más abajo, fail-fast al boot).
   MAIL_TRANSPORT: new V.StringNotNull({ defaultValue: "console", in: ["console", "smtp"] }),
+  // Servidor SMTP (solo con MAIL_TRANSPORT=smtp). SMTP_SECURE=true = TLS
+  // implícito (puerto 465); false = claro/STARTTLS (587/25, nodemailer
+  // negocia STARTTLS si el servidor lo ofrece).
+  SMTP_HOST: new V.String({ maxLength: 255 }),
+  SMTP_PORT: new V.NumberNotNull({ defaultValue: 587, min: 1, max: 65535 }),
+  SMTP_SECURE: new V.BooleanNotNull({ defaultValue: false }),
+  // Credenciales SMTP opcionales (relays internos sin auth): si se define una,
+  // la otra es obligatoria (se valida más abajo).
+  SMTP_USER: new V.String({ maxLength: 320 }),
+  SMTP_PASS: new V.String({ maxLength: 512 }),
   // Apaga el rate limiting (solo para tests / desarrollo local). En producción
   // debe quedar activo: es la única defensa contra credential-stuffing y
   // fuerza bruta de TOTP a nivel de IP.
@@ -66,6 +77,22 @@ if (env.PLATFORM_TICKET_KEY.length < 32) {
   process.exit(1);
 }
 
+// Fail-fast del transporte SMTP (§9): con MAIL_TRANSPORT=smtp la configuración
+// incompleta debe impedir el arranque, no descubrirse en el primer correo
+// (los tokens de reset/invitación viajan SOLO por email).
+if (env.MAIL_TRANSPORT === "smtp") {
+  if (env.SMTP_HOST === null || env.SMTP_HOST.trim().length === 0) {
+    console.error("MAIL_TRANSPORT=smtp exige SMTP_HOST");
+    process.exit(1);
+  }
+  const hasUser = env.SMTP_USER !== null && env.SMTP_USER.length > 0;
+  const hasPass = env.SMTP_PASS !== null && env.SMTP_PASS.length > 0;
+  if (hasUser !== hasPass) {
+    console.error("SMTP_USER y SMTP_PASS deben definirse juntos (o ninguno de los dos)");
+    process.exit(1);
+  }
+}
+
 export const config = {
   databaseUrl: env.DATABASE_URL,
   platformMasterKey: env.PLATFORM_MASTER_KEY,
@@ -81,6 +108,11 @@ export const config = {
   authAppBaseUrl: env.AUTH_APP_BASE_URL.replace(/\/+$/u, ""),
   mailFrom: env.MAIL_FROM,
   mailTransport: env.MAIL_TRANSPORT as "console" | "smtp",
+  smtpHost: env.SMTP_HOST,
+  smtpPort: env.SMTP_PORT,
+  smtpSecure: env.SMTP_SECURE,
+  smtpUser: env.SMTP_USER,
+  smtpPass: env.SMTP_PASS,
   rateLimitDisabled: env.RATE_LIMIT_DISABLED,
   logLevel: env.LOG_LEVEL,
 } as const;

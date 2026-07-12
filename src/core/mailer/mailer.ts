@@ -1,9 +1,11 @@
+import nodemailer, { type Transporter } from "nodemailer";
+import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import { config } from "../../config";
 
 // Capa de correo transaccional (CLAUDE.md §4 / Fase 2). Abstracción mínima con
-// un transporte de CONSOLA (registra el correo en el log) para desarrollo y como
-// fallback. El transporte 'smtp' queda declarado pero pendiente de cablear un
-// proveedor real; se falla ruidosamente para que nadie asuma que se envió.
+// dos transportes: CONSOLA (default — registra el correo en el log, para
+// desarrollo y fallback) y SMTP real vía nodemailer (MAIL_TRANSPORT=smtp; su
+// configuración se valida fail-fast al boot en config.ts).
 //
 // El valor CRUDO de los tokens viaja SOLO por este canal; jamás se persiste ni
 // se loggea fuera del cuerpo del correo (la BD guarda solo su hash).
@@ -27,16 +29,53 @@ class ConsoleMailer implements Mailer {
   }
 }
 
+/**
+ * Transporte SMTP real (nodemailer). La configuración viene validada del boot
+ * (config.ts exige SMTP_HOST y credenciales completas o ninguna cuando
+ * MAIL_TRANSPORT=smtp); aquí solo se re-verifica como cinturón de seguridad.
+ */
+class SmtpMailer implements Mailer {
+  private readonly transporter: Transporter;
+
+  constructor() {
+    const host = config.smtpHost;
+    if (host === null || host.trim().length === 0) {
+      // No debería alcanzarse: config.ts aborta el boot sin SMTP_HOST.
+      throw new Error("MAIL_TRANSPORT=smtp exige SMTP_HOST");
+    }
+    const auth =
+      config.smtpUser !== null &&
+      config.smtpUser.length > 0 &&
+      config.smtpPass !== null &&
+      config.smtpPass.length > 0
+        ? { user: config.smtpUser, pass: config.smtpPass }
+        : undefined;
+    const options: SMTPTransport.Options = {
+      host,
+      port: config.smtpPort,
+      // true = TLS implícito (465); false = claro/STARTTLS negociado (587/25)
+      secure: config.smtpSecure,
+      ...(auth !== undefined ? { auth } : {}),
+    };
+    this.transporter = nodemailer.createTransport(options);
+  }
+
+  async send(message: EmailMessage): Promise<void> {
+    await this.transporter.sendMail({
+      from: config.mailFrom,
+      to: message.to,
+      subject: message.subject,
+      text: message.text,
+      ...(message.html !== undefined ? { html: message.html } : {}),
+    });
+  }
+}
+
 let cached: Mailer | null = null;
 
 export function getMailer(): Mailer {
   if (cached === null) {
-    if (config.mailTransport === "smtp") {
-      throw new Error(
-        "MAIL_TRANSPORT=smtp aún no está implementado: configura un proveedor o usa 'console'",
-      );
-    }
-    cached = new ConsoleMailer();
+    cached = config.mailTransport === "smtp" ? new SmtpMailer() : new ConsoleMailer();
   }
   return cached;
 }
