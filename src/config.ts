@@ -93,6 +93,55 @@ if (env.MAIL_TRANSPORT === "smtp") {
   }
 }
 
+// Validación fail-fast de PRODUCCIÓN (Fase 6.2): en `NODE_ENV=production` una
+// configuración insegura debe ABORTAR el arranque, no descubrirse en caliente.
+// En desarrollo estos valores son legítimos (HTTP local, sin CORS), así que solo
+// se exigen cuando el despliegue se declara productivo. Mismo patrón (process.exit(1)
+// con mensaje claro) que la validación de PLATFORM_MASTER_KEY de arriba.
+if (process.env.NODE_ENV === "production") {
+  const prodErrors: string[] = [];
+
+  // La cookie de refresh viaja con credenciales: sin Secure el navegador la
+  // expondría en texto claro. En producción SIEMPRE debe ir cifrada.
+  if (!env.COOKIE_SECURE) {
+    prodErrors.push("COOKIE_SECURE no puede ser false en producción (la cookie de refresh exige HTTPS)");
+  }
+
+  // CORS con credenciales + comodín = cualquier origen puede robar la sesión.
+  // Vacío es igualmente inválido: el SPA no podría hablar con el servicio.
+  const originList = env.CORS_ORIGINS.split(",")
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
+  if (originList.length === 0) {
+    prodErrors.push("CORS_ORIGINS no puede estar vacío en producción (declara la lista blanca de orígenes del front)");
+  }
+  if (originList.includes("*")) {
+    prodErrors.push("CORS_ORIGINS no puede contener '*' en producción (comodín + cookie de credenciales = robo de sesión)");
+  }
+
+  // Detecta llaves con valores de ejemplo obvios (los placeholders de .env.example
+  // o cualquier variante de CHANGE_ME): un secreto de plantilla en producción es
+  // tan grave como no tener secreto.
+  const looksLikePlaceholder = (value: string): boolean =>
+    /change_?me/iu.test(value) || value.includes("base64_32_bytes") || value.includes("example");
+  for (const [name, value] of [
+    ["PLATFORM_MASTER_KEY", env.PLATFORM_MASTER_KEY],
+    ["PLATFORM_TICKET_KEY", env.PLATFORM_TICKET_KEY],
+  ] as const) {
+    if (looksLikePlaceholder(value)) {
+      prodErrors.push(`${name} conserva un valor de ejemplo/placeholder; genera un secreto real (pnpm gen:secrets)`);
+    }
+  }
+
+  if (prodErrors.length > 0) {
+    console.error("Configuración de PRODUCCIÓN inválida:");
+    for (const msg of prodErrors) {
+      console.error(`  - ${msg}`);
+    }
+    process.exit(1);
+  }
+}
+
 export const config = {
   databaseUrl: env.DATABASE_URL,
   platformMasterKey: env.PLATFORM_MASTER_KEY,

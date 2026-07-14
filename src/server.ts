@@ -1,5 +1,5 @@
 import fastifyCookie from "@fastify/cookie";
-import Fastify from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import {
   serializerCompiler,
   validatorCompiler,
@@ -10,7 +10,13 @@ import { config } from "./config";
 import { registerErrorHandler } from "./core/http/error_handler";
 import { getMailer } from "./core/mailer/mailer";
 
-async function main(): Promise<void> {
+/**
+ * Construye la instancia Fastify con todo registrado (compilers, hooks de
+ * seguridad/CORS, cookie, rutas) SIN llamar a `listen()`. La usan tanto el
+ * bootstrap (`main`) como los tests de integración (`app.inject()` en proceso,
+ * sin abrir puerto). Es la única frontera de construcción de la app.
+ */
+export async function buildApp(): Promise<FastifyInstance> {
   // Instancia el mailer AL BOOT (no en el primer correo): con
   // MAIL_TRANSPORT=smtp una configuración inválida debe tumbar el arranque
   // (fail-fast §9) — los tokens de reset/invitación viajan solo por email.
@@ -97,10 +103,19 @@ async function main(): Promise<void> {
 
   await app.register(authV1Routes);
 
+  return app;
+}
+
+async function main(): Promise<void> {
+  const app = await buildApp();
   await app.listen({ port: config.port, host: config.host });
 }
 
-main().catch((err) => {
-  console.error("Fallo al arrancar auth_ws:", err);
-  process.exit(1);
-});
+// Solo arranca el servidor cuando se ejecuta como entrypoint (no al importar
+// `buildApp` desde los tests). `require.main === module` distingue ambos casos.
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("Fallo al arrancar auth_ws:", err);
+    process.exit(1);
+  });
+}
