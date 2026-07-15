@@ -1,11 +1,13 @@
 # syntax=docker/dockerfile:1
 
 # ── Etapa 1: build ──────────────────────────────────────────────────────────
-# node:20-slim (Debian/glibc): argon2 y pg traen prebuilds nativos fiables;
+# node:24-slim (Debian/glibc): argon2 y pg traen prebuilds nativos fiables;
 # alpine (musl) obligaría a compilar desde fuente (sin toolchain en la imagen).
+# Node 24 = Active LTS, coincide con el entorno local (v24.16.0) y con el
+# pnpm 11.x que exige node:sqlite (ausente en Node 20).
 # pnpm vía corepack para igualar el toolchain real del proyecto: pnpm-lock.yaml
 # es la fuente de verdad (el package-lock.json quedó obsoleto).
-FROM node:20-slim AS build
+FROM node:24-slim AS build
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 # El store en /pnpm/store: coincide con el cache mount de abajo (build más
@@ -32,7 +34,7 @@ RUN pnpm run build
 RUN pnpm prune --prod
 
 # ── Etapa 2: runtime ────────────────────────────────────────────────────────
-FROM node:20-slim
+FROM node:24-slim
 # NODE_ENV=production es OBLIGATORIO: sin él, server.ts intenta cargar el
 # transporte pino-pretty (devDependency, ausente en prod) y el proceso muere al
 # boot; además activa las validaciones fail-fast de producción de config.ts.
