@@ -7,6 +7,7 @@ import {
 } from "structure-verifier/fastify";
 import { authV1Routes } from "./api/auth/v1/auth_v1.routes";
 import { config } from "./config";
+import { pingDatabase } from "./core/db/ping";
 import { registerErrorHandler } from "./core/http/error_handler";
 import { getMailer } from "./core/mailer/mailer";
 
@@ -99,7 +100,22 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   await app.register(fastifyCookie);
 
+  // Liveness (¿el proceso responde?): siempre 200 mientras Fastify atienda.
   app.get("/health", async () => ({ status: "ok" }));
+
+  // Readiness (¿el servicio puede operar?): verifica la dependencia crítica —
+  // Postgres. 200 { status: 'ok', db: 'up' } si el pool responde; 503
+  // { status: 'error', db: 'down' } si no. Sin cuerpos ni detalles que
+  // filtren internals. Útil para orquestadores/balanceadores.
+  app.get("/health/ready", async (_request, reply) => {
+    try {
+      await pingDatabase();
+      return { status: "ok", db: "up" };
+    } catch (err) {
+      app.log.error({ err }, "health readiness: db unreachable");
+      return reply.code(503).send({ status: "error", db: "down" });
+    }
+  });
 
   await app.register(authV1Routes);
 
