@@ -9,6 +9,9 @@
     "node": ">=20"
   },
   "packageManager": "pnpm@11.5.2",
+  "pnpm": {
+    "onlyBuiltDependencies": ["argon2", "esbuild"]
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "seed:login": "tsx scripts/seed-login.ts",
