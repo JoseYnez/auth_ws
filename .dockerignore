@@ -4,3 +4,10 @@ dist
 .env.*
 .git
 *.log
+# Gestor de paquetes: la imagen usa pnpm (pnpm-lock.yaml). El package-lock.json
+# quedó obsoleto y no debe entrar al contexto para no confundir el build.
+package-lock.json
+coverage
+.vscode
+scripts
+# NOTA: vendor/ (directorio vendorizado de structure-verifier) SÍ debe ir al contexto.
