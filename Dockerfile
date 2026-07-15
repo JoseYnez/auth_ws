@@ -21,7 +21,7 @@ WORKDIR /app
 # Dependencias con lockfile congelado (build reproducible). El directorio
 # vendorizado de structure-verifier viaja en el contexto (vendor/), así que el
 # `file:` del package.json resuelve SIN salir del contexto de build de auth_ws/.
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY vendor ./vendor
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm config set store-dir /pnpm/store && pnpm install --frozen-lockfile
