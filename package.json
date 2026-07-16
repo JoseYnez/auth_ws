@@ -30,7 +30,7 @@
     "jose": "^6.2.3",
     "nodemailer": "^9.0.3",
     "pg": "^8.21.0",
-    "structure-verifier": "file:vendor/structure-verifier"
+    "structure-verifier": "^1.0.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",

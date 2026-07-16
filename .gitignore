@@ -4,6 +4,11 @@ node_modules/
 # Build
 dist/
 *.tsbuildinfo
+# Excepción: el dist compilado del paquete vendorizado structure-verifier SÍ se
+# trackea — es un reemplazo drop-in del paquete npm (que ya publica su dist) y el
+# Docker build no lo recompila; sin él, tsc no resuelve el módulo.
+!vendor/structure-verifier/dist/
+!vendor/structure-verifier/dist/**
 
 # Entorno (secretos: DATABASE_URL, PLATFORM_MASTER_KEY, PLATFORM_TICKET_KEY)
 .env

@@ -1,5 +1,8 @@
 node_modules
 dist
+# El dist del paquete vendorizado SÍ debe entrar al contexto (el Docker build no
+# lo recompila; sin él tsc no resuelve structure-verifier).
+!vendor/structure-verifier/dist
 .env
 .env.*
 .git
