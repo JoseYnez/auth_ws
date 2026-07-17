@@ -1,5 +1,9 @@
 allowBuilds:
   argon2: true
   esbuild: true
+# structure-verifier es nuestra propia librería (repo JoseLuisYanez2000):
+# no está sujeta a la cuarentena anti-supply-chain de paquetes de terceros.
+# Patrón por nombre = excluye todas sus versiones sin relajar la política del
+# resto de dependencias.
 minimumReleaseAgeExclude:
-  - structure-verifier@1.1.2
+  - structure-verifier
