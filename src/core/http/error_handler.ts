@@ -9,6 +9,12 @@ import { hasStructureVerifierValidationErrors } from "structure-verifier/fastify
 export function registerErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((err, req, reply) => {
     if (hasStructureVerifierValidationErrors(err)) {
+      // Detalle de qué campo falló (instancePath + message, SIN valores: el body
+      // de auth no se loggea, §7). Facilita ubicar el 400 sin abrir DevTools.
+      req.log.warn(
+        { method: req.method, url: req.url, validation: err.validation },
+        "400 validacion de body/params rechazada",
+      );
       return reply.status(400).send({ errors: err.validation });
     }
     req.log.error({ err }, "error no controlado");
