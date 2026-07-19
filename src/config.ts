@@ -31,7 +31,11 @@ const envV = new V.ObjectNotNull({
   // Transporte de correo: 'console' registra el correo en el log (dev/fallback,
   // default); 'smtp' envía de verdad vía nodemailer (exige SMTP_HOST — se
   // valida más abajo, fail-fast al boot).
-  MAIL_TRANSPORT: new V.StringNotNull({ defaultValue: "console", in: ["console", "smtp"] }),
+  // 'memory' captura los correos en un outbox (solo tests de integración).
+  MAIL_TRANSPORT: new V.StringNotNull({
+    defaultValue: "console",
+    in: ["console", "smtp", "memory"],
+  }),
   // Servidor SMTP (solo con MAIL_TRANSPORT=smtp). SMTP_SECURE=true = TLS
   // implícito (puerto 465); false = claro/STARTTLS (587/25, nodemailer
   // negocia STARTTLS si el servidor lo ofrece).
@@ -42,6 +46,19 @@ const envV = new V.ObjectNotNull({
   // la otra es obligatoria (se valida más abajo).
   SMTP_USER: new V.String({ maxLength: 320 }),
   SMTP_PASS: new V.String({ maxLength: 512 }),
+  // Transporte del código OTP 2FA por SMS/WhatsApp: 'console' loggea el código
+  // (dev/fallback, default); 'twilio' envía de verdad (exige TWILIO_* — se
+  // valida más abajo, fail-fast al boot); 'memory' captura en un outbox (tests).
+  // El canal email usa el mailer (MAIL_TRANSPORT).
+  OTP_SENDER_TRANSPORT: new V.StringNotNull({
+    defaultValue: "console",
+    in: ["console", "twilio", "memory"],
+  }),
+  TWILIO_ACCOUNT_SID: new V.String({ maxLength: 64 }),
+  TWILIO_AUTH_TOKEN: new V.String({ maxLength: 128 }),
+  // Remitentes en E.164 (el prefijo whatsapp: lo añade el transporte).
+  TWILIO_SMS_FROM: new V.String({ maxLength: 16 }),
+  TWILIO_WHATSAPP_FROM: new V.String({ maxLength: 16 }),
   // Apaga el rate limiting (solo para tests / desarrollo local). En producción
   // debe quedar activo: es la única defensa contra credential-stuffing y
   // fuerza bruta de TOTP a nivel de IP.
@@ -93,6 +110,27 @@ if (env.MAIL_TRANSPORT === "smtp") {
   }
 }
 
+// Fail-fast del transporte OTP (§9): con OTP_SENDER_TRANSPORT=twilio la
+// configuración incompleta debe impedir el arranque, no descubrirse en el
+// primer login con 2FA de canal (el código OTP viaja SOLO por ese canal).
+if (env.OTP_SENDER_TRANSPORT === "twilio") {
+  const missing: string[] = [];
+  for (const [name, value] of [
+    ["TWILIO_ACCOUNT_SID", env.TWILIO_ACCOUNT_SID],
+    ["TWILIO_AUTH_TOKEN", env.TWILIO_AUTH_TOKEN],
+    ["TWILIO_SMS_FROM", env.TWILIO_SMS_FROM],
+    ["TWILIO_WHATSAPP_FROM", env.TWILIO_WHATSAPP_FROM],
+  ] as const) {
+    if (value === null || value.trim().length === 0) {
+      missing.push(name);
+    }
+  }
+  if (missing.length > 0) {
+    console.error(`OTP_SENDER_TRANSPORT=twilio exige: ${missing.join(", ")}`);
+    process.exit(1);
+  }
+}
+
 // Validación fail-fast de PRODUCCIÓN (Fase 6.2): en `NODE_ENV=production` una
 // configuración insegura debe ABORTAR el arranque, no descubrirse en caliente.
 // En desarrollo estos valores son legítimos (HTTP local, sin CORS), así que solo
@@ -104,7 +142,9 @@ if (process.env.NODE_ENV === "production") {
   // La cookie de refresh viaja con credenciales: sin Secure el navegador la
   // expondría en texto claro. En producción SIEMPRE debe ir cifrada.
   if (!env.COOKIE_SECURE) {
-    prodErrors.push("COOKIE_SECURE no puede ser false en producción (la cookie de refresh exige HTTPS)");
+    prodErrors.push(
+      "COOKIE_SECURE no puede ser false en producción (la cookie de refresh exige HTTPS)",
+    );
   }
 
   // CORS con credenciales + comodín = cualquier origen puede robar la sesión.
@@ -113,10 +153,14 @@ if (process.env.NODE_ENV === "production") {
     .map((o) => o.trim())
     .filter((o) => o.length > 0);
   if (originList.length === 0) {
-    prodErrors.push("CORS_ORIGINS no puede estar vacío en producción (declara la lista blanca de orígenes del front)");
+    prodErrors.push(
+      "CORS_ORIGINS no puede estar vacío en producción (declara la lista blanca de orígenes del front)",
+    );
   }
   if (originList.includes("*")) {
-    prodErrors.push("CORS_ORIGINS no puede contener '*' en producción (comodín + cookie de credenciales = robo de sesión)");
+    prodErrors.push(
+      "CORS_ORIGINS no puede contener '*' en producción (comodín + cookie de credenciales = robo de sesión)",
+    );
   }
 
   // Detecta llaves con valores de ejemplo obvios (los placeholders de .env.example
@@ -129,7 +173,9 @@ if (process.env.NODE_ENV === "production") {
     ["PLATFORM_TICKET_KEY", env.PLATFORM_TICKET_KEY],
   ] as const) {
     if (looksLikePlaceholder(value)) {
-      prodErrors.push(`${name} conserva un valor de ejemplo/placeholder; genera un secreto real (pnpm gen:secrets)`);
+      prodErrors.push(
+        `${name} conserva un valor de ejemplo/placeholder; genera un secreto real (pnpm gen:secrets)`,
+      );
     }
   }
 
@@ -156,12 +202,17 @@ export const config = {
     .filter((o) => o.length > 0),
   authAppBaseUrl: env.AUTH_APP_BASE_URL.replace(/\/+$/u, ""),
   mailFrom: env.MAIL_FROM,
-  mailTransport: env.MAIL_TRANSPORT as "console" | "smtp",
+  mailTransport: env.MAIL_TRANSPORT as "console" | "smtp" | "memory",
   smtpHost: env.SMTP_HOST,
   smtpPort: env.SMTP_PORT,
   smtpSecure: env.SMTP_SECURE,
   smtpUser: env.SMTP_USER,
   smtpPass: env.SMTP_PASS,
+  otpSenderTransport: env.OTP_SENDER_TRANSPORT as "console" | "twilio" | "memory",
+  twilioAccountSid: env.TWILIO_ACCOUNT_SID,
+  twilioAuthToken: env.TWILIO_AUTH_TOKEN,
+  twilioSmsFrom: env.TWILIO_SMS_FROM,
+  twilioWhatsappFrom: env.TWILIO_WHATSAPP_FROM,
   rateLimitDisabled: env.RATE_LIMIT_DISABLED,
   logLevel: env.LOG_LEVEL,
 } as const;

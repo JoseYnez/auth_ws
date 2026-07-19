@@ -1,4 +1,5 @@
 import { Verifiers as V } from "structure-verifier";
+import { E164_PATTERN } from "../../../core/otp_sender/masking";
 
 // Política de contraseñas de la plataforma (aplicada en confirm/change):
 // longitud mínima 12, máxima 256 (argon2id no necesita más restricciones).
@@ -27,8 +28,16 @@ export const loginV1V = new V.ObjectNotNull(
 export const twoFactorV1V = new V.ObjectNotNull(
   {
     ticket: new V.StringNotNull({ minLength: 1, maxLength: 4096 }),
-    // 6 dígitos TOTP o un código de recuperación (8-32 chars)
+    // 6 dígitos (TOTP o código OTP de canal) o un código de recuperación (8-32)
     code: new V.StringNotNull({ minLength: 6, maxLength: 32 }).trim(),
+  },
+  { strictMode: true },
+);
+
+/** Reenvío del código 2FA de canal durante el login (método sms/email/whatsapp). */
+export const twoFactorResendV1V = new V.ObjectNotNull(
+  {
+    ticket: new V.StringNotNull({ minLength: 1, maxLength: 4096 }),
   },
   { strictMode: true },
 );
@@ -102,9 +111,29 @@ export const invitationAcceptV1V = new V.ObjectNotNull(
 export const twoFactorEnrollV1V = new V.ObjectNotNull(
   {
     enrollmentTicket: new V.StringNotNull({ minLength: 1, maxLength: 4096 }),
+    // Método 2FA elegido (2FA multicanal): totp mantiene el flujo clásico;
+    // los canales envían un código OTP al contacto vinculado.
+    method: new V.StringNotNull({ in: ["totp", "sms", "email", "whatsapp"] }),
+    // Teléfono E.164 (solo sms/whatsapp; si falta se usa el registrado en BD).
+    phone: new V.String({ minLength: 8, maxLength: 16, regex: E164_PATTERN }),
   },
   { strictMode: true },
 );
+
+/** Reenvío del código OTP durante el enrolamiento de un método de canal. */
+export const twoFactorEnrollResendV1V = new V.ObjectNotNull(
+  {
+    enrollmentTicket: new V.StringNotNull({ minLength: 1, maxLength: 4096 }),
+  },
+  { strictMode: true },
+);
+
+/** Respuesta de los endpoints de reenvío (login y enrolamiento). */
+export const twoFactorResendResponseV1V = new V.ObjectNotNull({
+  destination: new V.StringNotNull(),
+  remaining: new V.NumberNotNull(),
+  cooldownSeconds: new V.NumberNotNull(),
+});
 
 export const twoFactorConfirmV1V = new V.ObjectNotNull(
   {

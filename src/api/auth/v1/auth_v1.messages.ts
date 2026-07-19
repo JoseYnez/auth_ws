@@ -77,6 +77,76 @@ const MESSAGES: Record<string, Record<string, MessageResponse>> = {
       messageType: "error",
     },
   },
+  // Reenvío del código 2FA de canal (sms/email/whatsapp): límites por ticket.
+  // No filtran estado de cuenta: solo se alcanzan con un ticket 2FA válido.
+  ERR_2FA_RESEND_COOLDOWN: {
+    en: {
+      code: "ERR_2FA_RESEND_COOLDOWN",
+      messageForDeveloper: "A code was sent recently; wait for the cooldown before resending",
+      messageForClient: "We just sent you a code. Wait a moment before requesting another",
+      httpStatusCode: 429,
+      messageType: "error",
+    },
+    es: {
+      code: "ERR_2FA_RESEND_COOLDOWN",
+      messageForDeveloper: "Se envió un código hace poco; espera el cooldown antes de reenviar",
+      messageForClient: "Acabamos de enviarte un código. Espera un momento antes de pedir otro",
+      httpStatusCode: 429,
+      messageType: "error",
+    },
+  },
+  ERR_2FA_RESEND_LIMIT: {
+    en: {
+      code: "ERR_2FA_RESEND_LIMIT",
+      messageForDeveloper:
+        "Resend limit reached for this ticket; the last sent code is still valid",
+      messageForClient: "Resend limit reached. Use the last code we sent you or sign in again",
+      httpStatusCode: 429,
+      messageType: "error",
+    },
+    es: {
+      code: "ERR_2FA_RESEND_LIMIT",
+      messageForDeveloper:
+        "Límite de reenvíos alcanzado para este ticket; el último código sigue vigente",
+      messageForClient:
+        "Límite de reenvíos alcanzado. Usa el último código que te enviamos o vuelve a iniciar sesión",
+      httpStatusCode: 429,
+      messageType: "error",
+    },
+  },
+  ERR_2FA_METHOD_NOT_RESENDABLE: {
+    en: {
+      code: "ERR_2FA_METHOD_NOT_RESENDABLE",
+      messageForDeveloper: "The user's 2FA method has no deliverable code (e.g. TOTP)",
+      messageForClient: "Your verification method does not use sent codes",
+      httpStatusCode: 400,
+      messageType: "error",
+    },
+    es: {
+      code: "ERR_2FA_METHOD_NOT_RESENDABLE",
+      messageForDeveloper: "El método 2FA del usuario no envía códigos (p. ej. TOTP)",
+      messageForClient: "Tu método de verificación no usa códigos enviados",
+      httpStatusCode: 400,
+      messageType: "error",
+    },
+  },
+  ERR_PHONE_REQUIRED: {
+    en: {
+      code: "ERR_PHONE_REQUIRED",
+      messageForDeveloper: "SMS/WhatsApp 2FA requires a phone number (none on file, none provided)",
+      messageForClient: "A phone number is required for this verification method",
+      httpStatusCode: 400,
+      messageType: "error",
+    },
+    es: {
+      code: "ERR_PHONE_REQUIRED",
+      messageForDeveloper:
+        "El 2FA por SMS/WhatsApp exige un teléfono (no hay registrado ni se aportó)",
+      messageForClient: "Este método de verificación requiere un número de teléfono",
+      httpStatusCode: 400,
+      messageType: "error",
+    },
+  },
   ERR_TICKET_INVALID: {
     en: {
       code: "ERR_TICKET_INVALID",
@@ -96,7 +166,8 @@ const MESSAGES: Record<string, Record<string, MessageResponse>> = {
   ERR_INVITATION_INVALID: {
     en: {
       code: "ERR_INVITATION_INVALID",
-      messageForDeveloper: "Invitation token invalid, expired, already used, or user already has a credential",
+      messageForDeveloper:
+        "Invitation token invalid, expired, already used, or user already has a credential",
       messageForClient: "This invitation link is invalid or has expired. Ask for a new one",
       httpStatusCode: 400,
       messageType: "error",
@@ -283,7 +354,10 @@ export function extractLanguage(acceptLanguageHeader: string | undefined): strin
  * Get message response by code and language, with fallback to the default
  * language and then to a generic error.
  */
-export function getMessageByCode(code: string, language: string = DEFAULT_LANGUAGE): MessageResponse {
+export function getMessageByCode(
+  code: string,
+  language: string = DEFAULT_LANGUAGE,
+): MessageResponse {
   const byLanguage = MESSAGES[code];
   const resolved = byLanguage?.[language] ?? byLanguage?.[DEFAULT_LANGUAGE];
   return (

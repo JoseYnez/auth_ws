@@ -71,13 +71,58 @@ class SmtpMailer implements Mailer {
   }
 }
 
+/** Outbox en memoria para tests: los correos se capturan en vez de enviarse. */
+export const memoryMailOutbox: EmailMessage[] = [];
+
+class MemoryMailer implements Mailer {
+  async send(message: EmailMessage): Promise<void> {
+    memoryMailOutbox.push(message);
+  }
+}
+
+/** Vacía y devuelve el outbox (solo tests). */
+export function drainMailOutbox(): EmailMessage[] {
+  return memoryMailOutbox.splice(0, memoryMailOutbox.length);
+}
+
 let cached: Mailer | null = null;
 
 export function getMailer(): Mailer {
   if (cached === null) {
-    cached = config.mailTransport === "smtp" ? new SmtpMailer() : new ConsoleMailer();
+    cached =
+      config.mailTransport === "smtp"
+        ? new SmtpMailer()
+        : config.mailTransport === "memory"
+          ? new MemoryMailer()
+          : new ConsoleMailer();
   }
   return cached;
+}
+
+/** Correo con el código OTP 2FA (método de canal 'email'). */
+export function buildTwoFactorCodeEmail(
+  to: string,
+  code: string,
+  locale: "en" | "es",
+): EmailMessage {
+  if (locale === "es") {
+    return {
+      to,
+      subject: "Tu código de acceso",
+      text:
+        `Tu código de acceso es: ${code}\n\n` +
+        `Caduca en 10 minutos. Si no intentaste iniciar sesión, ignora este correo\n` +
+        `y considera cambiar tu contraseña.`,
+    };
+  }
+  return {
+    to,
+    subject: "Your access code",
+    text:
+      `Your access code is: ${code}\n\n` +
+      `It expires in 10 minutes. If you did not try to sign in, ignore this email\n` +
+      `and consider changing your password.`,
+  };
 }
 
 /** Correo de recuperación de contraseña con el enlace a auth_app (/reset). */

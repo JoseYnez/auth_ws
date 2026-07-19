@@ -18,6 +18,9 @@ export interface SpLoginOk {
   readonly mustChangeSecret: boolean;
   readonly twoFactorEnabled: boolean;
   readonly twoFactorMethod: string | null;
+  /** Contacto del método 2FA de canal: SOLO para enviar/enmascarar. */
+  readonly twoFactorEmail: string | null;
+  readonly twoFactorPhone: string | null;
   readonly tenants: Tenant[];
   readonly maxFailedLoginAttempts: number;
   readonly lockoutMinutes: number;
@@ -55,6 +58,25 @@ async function callResult<T>(tx: TxClient, sql: string, params: unknown[]): Prom
   const result = await tx.query(sql, params);
   return result.rows[0]?.p_result as T;
 }
+
+/** Método 2FA del contrato (el interno authenticator_app se normaliza a totp en BD). */
+export type TwoFactorMethod = "totp" | "sms" | "email" | "whatsapp";
+
+/** Purpose de challenge 2FA de canal (auth.verification_purpose_type). */
+export type TwoFactorChallengePurpose =
+  | "two_factor_sms_challenge"
+  | "two_factor_email_challenge"
+  | "two_factor_whatsapp_challenge";
+
+export interface TwoFactorChannelInfo {
+  readonly method: TwoFactorMethod;
+  readonly email: string;
+  readonly phone: string | null;
+}
+
+export type PendingTwoFactorEnrollment =
+  | { readonly method: "totp"; readonly secretEncrypted: string }
+  | { readonly method: "sms" | "email" | "whatsapp" };
 
 export const authRepository = {
   spLogin(tx: TxClient, appCode: string, identifier: string): Promise<SpLoginResult> {
@@ -227,7 +249,13 @@ export const authRepository = {
     tx: TxClient,
     tokenHash: string,
     newSecretHash: string,
-  ): Promise<{ ok: boolean; reason?: string; userId?: string; email?: string; twoFactorEnabled?: boolean }> {
+  ): Promise<{
+    ok: boolean;
+    reason?: string;
+    userId?: string;
+    email?: string;
+    twoFactorEnabled?: boolean;
+  }> {
     return callResult(tx, "CALL auth.sp_consume_invitation_token($1, $2, NULL)", [
       tokenHash,
       newSecretHash,
@@ -248,15 +276,113 @@ export const authRepository = {
   },
 
   async fnGetPendingTwoFactorSecret(tx: TxClient, userId: string): Promise<string | null> {
-    const result = await tx.query(
-      "SELECT auth.fn_get_pending_two_factor_secret($1) AS secret",
-      [userId],
-    );
+    const result = await tx.query("SELECT auth.fn_get_pending_two_factor_secret($1) AS secret", [
+      userId,
+    ]);
     return (result.rows[0]?.secret as string | null) ?? null;
   },
 
-  spActivateTwoFactor(tx: TxClient, userId: string): Promise<{ ok: boolean; reason?: string }> {
-    return callResult(tx, "CALL auth.sp_activate_two_factor($1, NULL)", [userId]);
+  spActivateTwoFactor(
+    tx: TxClient,
+    userId: string,
+    method: TwoFactorMethod,
+    codeHash: string | null,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    return callResult(tx, "CALL auth.sp_activate_two_factor($1, $2, $3, NULL)", [
+      userId,
+      method,
+      codeHash,
+    ]);
+  },
+
+  spIssueTwoFactorChallenge(
+    tx: TxClient,
+    args: {
+      userId: string;
+      purpose: TwoFactorChallengePurpose;
+      codeHash: string;
+      ttlSeconds: number;
+      ipAddress: string | null;
+      userAgent: string | null;
+    },
+  ): Promise<{
+    ok: boolean;
+    reason?: string;
+    expiresAt?: string;
+    email?: string;
+    phone?: string | null;
+  }> {
+    return callResult(tx, "CALL auth.sp_issue_two_factor_challenge($1, $2, $3, $4, $5, $6, NULL)", [
+      args.userId,
+      args.purpose,
+      args.codeHash,
+      args.ttlSeconds,
+      args.ipAddress,
+      args.userAgent,
+    ]);
+  },
+
+  spConsumeTwoFactorChallenge(
+    tx: TxClient,
+    userId: string,
+    purpose: TwoFactorChallengePurpose,
+    codeHash: string,
+  ): Promise<{ ok: boolean }> {
+    return callResult(tx, "CALL auth.sp_consume_two_factor_challenge($1, $2, $3, NULL)", [
+      userId,
+      purpose,
+      codeHash,
+    ]);
+  },
+
+  async fnGetTwoFactorChannelInfo(
+    tx: TxClient,
+    userId: string,
+  ): Promise<TwoFactorChannelInfo | null> {
+    const result = await tx.query("SELECT auth.fn_get_two_factor_channel_info($1) AS info", [
+      userId,
+    ]);
+    return (result.rows[0]?.info as TwoFactorChannelInfo | null) ?? null;
+  },
+
+  spEnrollTwoFactorChannel(
+    tx: TxClient,
+    args: {
+      userId: string;
+      method: "sms" | "email" | "whatsapp";
+      phone: string | null;
+      recoveryCodeHashes: string[];
+      codeHash: string;
+      ttlSeconds: number;
+      ipAddress: string | null;
+      userAgent: string | null;
+    },
+  ): Promise<{ ok: boolean; reason?: string; email?: string; phone?: string | null }> {
+    return callResult(
+      tx,
+      "CALL auth.sp_enroll_two_factor_channel($1, $2, $3, $4, $5, $6, $7, $8, NULL)",
+      [
+        args.userId,
+        args.method,
+        args.phone,
+        args.recoveryCodeHashes,
+        args.codeHash,
+        args.ttlSeconds,
+        args.ipAddress,
+        args.userAgent,
+      ],
+    );
+  },
+
+  async fnGetPendingTwoFactorEnrollment(
+    tx: TxClient,
+    userId: string,
+  ): Promise<PendingTwoFactorEnrollment | null> {
+    const result = await tx.query(
+      "SELECT auth.fn_get_pending_two_factor_enrollment($1) AS pending",
+      [userId],
+    );
+    return (result.rows[0]?.pending as PendingTwoFactorEnrollment | null) ?? null;
   },
 
   async fnGetSigningKey(tx: TxClient, customerId: string, appId: string): Promise<string | null> {

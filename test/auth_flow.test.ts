@@ -10,9 +10,13 @@
  * (password-reset/confirm, change-password): romperían el resto de la suite.
  */
 
+import { createHmac } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { signEnrollmentTicket } from "../src/core/jwt/enrollment_ticket";
+import { drainMailOutbox } from "../src/core/mailer/mailer";
+import { drainOtpOutbox } from "../src/core/otp_sender/otp_sender";
 import { buildApp } from "../src/server";
 
 // DSN de superusuario SOLO para el bootstrap del test: los pasos negativos
@@ -63,6 +67,108 @@ const CREDS = {
   deviceIdentifier: "vitest-device",
   deviceName: "vitest",
 };
+
+/**
+ * Ejecuta SQL de mantenimiento contra la BD de prueba como role_owner con
+ * contexto de auditoría (mismo patrón que resetAdminLockout).
+ */
+async function adminDb<T>(fn: (client: Client) => Promise<T>): Promise<T> {
+  const client = new Client({ connectionString: ADMIN_DSN });
+  await client.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET ROLE role_owner");
+    await client.query("SELECT set_config('audit.app_name', 'test', true)");
+    await client.query("SELECT set_config('audit.action', 'test_maintenance', true)");
+    const sys = await client.query("SELECT id FROM auth.users WHERE username = 'system'");
+    await client.query("SELECT set_config('audit.user_id', $1, true)", [sys.rows[0].id]);
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    await client.end();
+  }
+}
+
+/** Desactiva y limpia todo el 2FA del admin (deja el seed como al inicio). */
+async function resetAdminTwoFactor(): Promise<void> {
+  await adminDb(async (client) => {
+    await client.query(
+      `UPDATE auth.users
+          SET two_factor_enabled = false, two_factor_method = NULL,
+              phone = NULL, phone_verified_at = NULL
+        WHERE username = 'admin'`,
+    );
+    await client.query(
+      `UPDATE auth.user_two_factor_secrets s
+          SET status = 'deleted'
+         FROM auth.users u
+        WHERE s.user_id = u.id AND u.username = 'admin' AND s.status = 'active'`,
+    );
+    await client.query(
+      `UPDATE auth.user_two_factor_recovery_codes r
+          SET status = 'deleted'
+         FROM auth.users u
+        WHERE r.user_id = u.id AND u.username = 'admin' AND r.status = 'active'`,
+    );
+    await client.query(
+      `DELETE FROM auth.user_verification_tokens t
+        USING auth.users u
+        WHERE t.user_id = u.id AND u.username = 'admin'
+          AND t.purpose IN ('two_factor_sms_challenge', 'two_factor_email_challenge', 'two_factor_whatsapp_challenge')`,
+    );
+  });
+}
+
+// --- TOTP de referencia para los tests (RFC 6238, igual que src/core/crypto/totp) ---
+
+const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function base32DecodeForTest(input: string): Buffer {
+  let bits = 0;
+  let value = 0;
+  const bytes: number[] = [];
+  for (const char of input.toUpperCase().replace(/=+$/u, "")) {
+    value = (value << 5) | BASE32_ALPHABET.indexOf(char);
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+/** Código TOTP del step actual + offset (offset ±1 queda dentro de la ventana). */
+function totpCodeAt(secretBase32: string, stepOffset: number): string {
+  const step = Math.floor(Date.now() / 1000 / 30) + stepOffset;
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(step));
+  const digest = createHmac("sha1", base32DecodeForTest(secretBase32)).update(counter).digest();
+  const offset = (digest[digest.length - 1] ?? 0) & 0x0f;
+  const code =
+    (((digest[offset] ?? 0) & 0x7f) << 24) |
+    (((digest[offset + 1] ?? 0) & 0xff) << 16) |
+    (((digest[offset + 2] ?? 0) & 0xff) << 8) |
+    ((digest[offset + 3] ?? 0) & 0xff);
+  return String(code % 10 ** 6).padStart(6, "0");
+}
+
+/** Login hasta el paso two-factor; devuelve el body de la respuesta. */
+async function loginToTwoFactor(deviceSuffix: string) {
+  const res = await app.inject({
+    method: "POST",
+    url: "/auth/login",
+    payload: { ...CREDS, deviceIdentifier: `vitest-2fa-${deviceSuffix}` },
+  });
+  expect(res.statusCode).toBe(200);
+  const body = res.json();
+  expect(body.kind).toBe("two-factor");
+  return body;
+}
 
 // Cookie de refresh POR APP: auth_refresh__<appCode> (contrato §2.2).
 const REFRESH_COOKIE = "auth_refresh__admin-app";
@@ -381,5 +487,250 @@ describe("flujo de autenticación (integración, BD real)", () => {
     expect(mEs.code).toBe("ERR_LOGIN_INVALID");
     expect(mEs.messageForClient).not.toBe(mEn.messageForClient);
     expect(mEs.messageForClient.length).toBeGreaterThan(0);
+  });
+});
+
+describe("2FA multicanal (whatsapp/sms/email + regresión TOTP)", () => {
+  const TEST_PHONE = "+5215512345678";
+  let adminId = "";
+  let adminEmail = "";
+  let recoveryCodes: string[] = [];
+
+  beforeAll(async () => {
+    // Los tests de opacidad/i18n (7 y 9) dejan al admin bloqueado por
+    // intentos fallidos: esta suite necesita volver a loguear.
+    await resetAdminLockout();
+    const row = await adminDb((client) =>
+      client.query("SELECT id, email FROM auth.users WHERE username = 'admin'"),
+    );
+    adminId = row.rows[0].id;
+    adminEmail = row.rows[0].email;
+    await resetAdminTwoFactor();
+    drainOtpOutbox();
+    drainMailOutbox();
+  });
+
+  afterAll(async () => {
+    // El resto de suites y corridas futuras esperan al admin SIN 2FA.
+    await resetAdminTwoFactor();
+  });
+
+  it("10. enroll whatsapp: destino enmascarado, recovery codes y código en el outbox", async () => {
+    const enrollmentTicket = await signEnrollmentTicket(adminId, adminEmail);
+    const res = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor/enroll",
+      payload: { enrollmentTicket, method: "whatsapp", phone: TEST_PHONE },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.method).toBe("whatsapp");
+    expect(body.destination).toBe("+52•••5678");
+    expect(body.cooldownSeconds).toBe(60);
+    expect(Array.isArray(body.recoveryCodes)).toBe(true);
+    expect(body.recoveryCodes.length).toBeGreaterThan(0);
+    recoveryCodes = body.recoveryCodes;
+
+    const sent = drainOtpOutbox();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.channel).toBe("whatsapp");
+    expect(sent[0]?.to).toBe(TEST_PHONE);
+    expect(sent[0]?.code).toMatch(/^\d{6}$/u);
+
+    // Confirm con código incorrecto: 400 reintentable, no activa nada.
+    const wrongCode = sent[0]!.code === "000000" ? "000001" : "000000";
+    const bad = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor/confirm",
+      payload: { enrollmentTicket, code: wrongCode },
+    });
+    expect(bad.statusCode).toBe(400);
+
+    // Confirm con el código real: activa el método y sella el teléfono.
+    const ok = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor/confirm",
+      payload: { enrollmentTicket, code: sent[0]!.code },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().kind).toBe("done");
+
+    const state = await adminDb((client) =>
+      client.query(
+        `SELECT two_factor_enabled, two_factor_method, phone, phone_verified_at
+           FROM auth.users WHERE id = $1`,
+        [adminId],
+      ),
+    );
+    expect(state.rows[0].two_factor_enabled).toBe(true);
+    expect(state.rows[0].two_factor_method).toBe("whatsapp");
+    expect(state.rows[0].phone).toBe(TEST_PHONE);
+    expect(state.rows[0].phone_verified_at).not.toBeNull();
+  });
+
+  it("11. login por whatsapp: envía el código, lo canjea y entrega tenants", async () => {
+    const step = await loginToTwoFactor("wa-login");
+    expect(step.method).toBe("whatsapp");
+    expect(step.destination).toBe("+52•••5678");
+
+    const sent = drainOtpOutbox();
+    expect(sent).toHaveLength(1);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor",
+      payload: { ticket: step.ticket, code: sent[0]!.code },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().kind).toBe("tenants");
+    expect(res.json().tenants).toHaveLength(3);
+  });
+
+  it("12. resend: el código nuevo invalida el anterior y el cooldown responde 429", async () => {
+    const step = await loginToTwoFactor("wa-resend");
+    const first = drainOtpOutbox();
+    expect(first).toHaveLength(1);
+
+    const resend = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor/resend",
+      payload: { ticket: step.ticket },
+    });
+    expect(resend.statusCode).toBe(200);
+    expect(resend.json().destination).toBe("+52•••5678");
+    expect(resend.json().remaining).toBe(2);
+    expect(resend.json().cooldownSeconds).toBe(60);
+
+    const second = drainOtpOutbox();
+    expect(second).toHaveLength(1);
+    expect(second[0]!.code).not.toBe(first[0]!.code);
+
+    // Reenvío inmediato: cooldown de 60 s → 429.
+    const tooSoon = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor/resend",
+      payload: { ticket: step.ticket },
+    });
+    expect(tooSoon.statusCode).toBe(429);
+    expect(tooSoon.json().message.code).toBe("ERR_2FA_RESEND_COOLDOWN");
+
+    // El código VIEJO ya no vale (la emisión borró su challenge)…
+    const stale = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor",
+      payload: { ticket: step.ticket, code: first[0]!.code },
+    });
+    expect(stale.statusCode).toBe(400);
+    expect(stale.json().message.code).toBe("ERR_2FA_INVALID_CODE");
+
+    // …y el NUEVO sí.
+    const fresh = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor",
+      payload: { ticket: step.ticket, code: second[0]!.code },
+    });
+    expect(fresh.statusCode).toBe(200);
+    expect(fresh.json().kind).toBe("tenants");
+  });
+
+  it("13. un código de recuperación sigue funcionando con método de canal", async () => {
+    const step = await loginToTwoFactor("wa-recovery");
+    drainOtpOutbox();
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor",
+      payload: { ticket: step.ticket, code: recoveryCodes[0] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().kind).toBe("tenants");
+  });
+
+  it("14. canal email: el código viaja por el mailer y sella el flujo completo", async () => {
+    await resetAdminTwoFactor();
+    drainMailOutbox();
+
+    const enrollmentTicket = await signEnrollmentTicket(adminId, adminEmail);
+    const enroll = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor/enroll",
+      payload: { enrollmentTicket, method: "email" },
+    });
+    expect(enroll.statusCode).toBe(200);
+    expect(enroll.json().method).toBe("email");
+    expect(enroll.json().destination).toBe(`${adminEmail[0]}•••@${adminEmail.split("@")[1]}`);
+
+    const mails = drainMailOutbox();
+    expect(mails).toHaveLength(1);
+    expect(mails[0]?.to).toBe(adminEmail);
+    const code = /\b(\d{6})\b/u.exec(mails[0]!.text)?.[1];
+    expect(code).toBeDefined();
+
+    const confirm = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor/confirm",
+      payload: { enrollmentTicket, code },
+    });
+    expect(confirm.statusCode).toBe(200);
+
+    const step = await loginToTwoFactor("email-login");
+    expect(step.method).toBe("email");
+    const loginMails = drainMailOutbox();
+    expect(loginMails).toHaveLength(1);
+    const loginCode = /\b(\d{6})\b/u.exec(loginMails[0]!.text)?.[1];
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor",
+      payload: { ticket: step.ticket, code: loginCode },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().kind).toBe("tenants");
+  });
+
+  it("15. regresión TOTP: enroll + confirm + login intactos", async () => {
+    await resetAdminTwoFactor();
+
+    const enrollmentTicket = await signEnrollmentTicket(adminId, adminEmail);
+    const enroll = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor/enroll",
+      payload: { enrollmentTicket, method: "totp" },
+    });
+    expect(enroll.statusCode).toBe(200);
+    const body = enroll.json();
+    expect(body.method).toBe("totp");
+    expect(typeof body.secret).toBe("string");
+    expect(body.otpauthUri).toContain("otpauth://totp/");
+
+    const confirm = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor/confirm",
+      payload: { enrollmentTicket, code: totpCodeAt(body.secret, 0) },
+    });
+    expect(confirm.statusCode).toBe(200);
+
+    const step = await loginToTwoFactor("totp-login");
+    expect(step.method).toBe("totp");
+    expect(step.destination).toBeUndefined();
+    // El reenvío no aplica a TOTP.
+    const resend = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor/resend",
+      payload: { ticket: step.ticket },
+    });
+    expect(resend.statusCode).toBe(400);
+    expect(resend.json().message.code).toBe("ERR_2FA_METHOD_NOT_RESENDABLE");
+
+    // Anti-replay: el step de la confirmación no se reutiliza — usar el
+    // siguiente (dentro de la ventana ±1 de matchTotpStep).
+    const res = await app.inject({
+      method: "POST",
+      url: "/auth/two-factor",
+      payload: { ticket: step.ticket, code: totpCodeAt(body.secret, 1) },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().kind).toBe("tenants");
   });
 });

@@ -4,7 +4,7 @@ import { config } from "../../../config";
 import { buildAuditContext } from "../../../core/audit/audit_context";
 import { rateLimit } from "../../../core/http/rate_limit";
 import { authController } from "./auth_v1.controller";
-import type { LoginStepResult, SessionResult } from "./auth_v1.controller";
+import type { LoginStepResult, SessionResult, TwoFactorResendResult } from "./auth_v1.controller";
 import {
   changePasswordV1V,
   createSessionV1V,
@@ -19,7 +19,10 @@ import {
   sessionResponseV1V,
   switchSessionV1V,
   twoFactorConfirmV1V,
+  twoFactorEnrollResendV1V,
   twoFactorEnrollV1V,
+  twoFactorResendResponseV1V,
+  twoFactorResendV1V,
   twoFactorV1V,
   verifyTokenResponseV1V,
 } from "./auth_v1.verifier";
@@ -102,6 +105,22 @@ function sendStep(reply: FastifyReply, result: LoginStepResult) {
 }
 
 /**
+ * Mapea el resultado de un reenvío de código OTP: 200 con el destino
+ * enmascarado, o el estatus del catálogo (429 cooldown/límite, 400 método sin
+ * envío, 401 ticket inválido).
+ */
+function sendResendResult(reply: FastifyReply, result: TwoFactorResendResult) {
+  if (result.kind === "invalid") {
+    return reply.code(result.message.httpStatusCode).send(result);
+  }
+  return reply.code(200).send({
+    destination: result.destination,
+    remaining: result.remaining,
+    cooldownSeconds: result.cooldownSeconds,
+  });
+}
+
+/**
  * Mapea el resultado de sesión: 200 + cookie de la app del resultado, o 401
  * opaco (limpiando la cookie de la app SOLO cuando el fallo tiene app conocida
  * — nunca se tumba la sesión vigente de otra app).
@@ -148,6 +167,24 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
     },
   );
 
+  // Reenvío del código OTP 2FA de canal durante el login. Además del rate
+  // limit por IP, el controller aplica el throttle por ticket (3 reenvíos,
+  // cooldown 60 s).
+  app.post(
+    "/auth/two-factor/resend",
+    {
+      schema: {
+        body: twoFactorResendV1V,
+        response: { 200: twoFactorResendResponseV1V },
+      },
+      preHandler: rateLimit({ tag: "2fa-resend", max: 5, windowMs: 60_000 }),
+    },
+    async (req, reply) => {
+      const result = await authController.twoFactorResend(req.body, buildAuditContext(req));
+      return sendResendResult(reply, result);
+    },
+  );
+
   app.post(
     "/auth/change-password",
     {
@@ -188,12 +225,37 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
       if (result.kind === "invalid") {
         return reply.code(result.message.httpStatusCode).send(result);
       }
-      // Solo los campos contratados (secreto/URI/códigos); no se filtra `kind`.
+      // Solo los campos contratados por método; no se filtra `kind`.
+      if (result.method === "totp") {
+        return reply.code(200).send({
+          method: result.method,
+          secret: result.secret,
+          otpauthUri: result.otpauthUri,
+          recoveryCodes: result.recoveryCodes,
+        });
+      }
       return reply.code(200).send({
-        secret: result.secret,
-        otpauthUri: result.otpauthUri,
+        method: result.method,
+        destination: result.destination,
         recoveryCodes: result.recoveryCodes,
+        cooldownSeconds: result.cooldownSeconds,
       });
+    },
+  );
+
+  // Reenvío del código OTP durante el enrolamiento de un método de canal.
+  app.post(
+    "/auth/two-factor/enroll/resend",
+    {
+      schema: {
+        body: twoFactorEnrollResendV1V,
+        response: { 200: twoFactorResendResponseV1V },
+      },
+      preHandler: rateLimit({ tag: "2fa-enroll-resend", max: 5, windowMs: 60_000 }),
+    },
+    async (req, reply) => {
+      const result = await authController.enrollTwoFactorResend(req.body, buildAuditContext(req));
+      return sendResendResult(reply, result);
     },
   );
 
