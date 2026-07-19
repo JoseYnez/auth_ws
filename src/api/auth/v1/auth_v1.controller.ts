@@ -11,10 +11,7 @@ import {
   generateTotpSecretBase32,
   matchTotpStep,
 } from "../../../core/crypto/totp";
-import {
-  signEnrollmentTicket,
-  verifyEnrollmentTicket,
-} from "../../../core/jwt/enrollment_ticket";
+import { signEnrollmentTicket, verifyEnrollmentTicket } from "../../../core/jwt/enrollment_ticket";
 import { buildPasswordResetEmail, getMailer } from "../../../core/mailer/mailer";
 import {
   clearTwoFactorAttempts,
@@ -73,11 +70,17 @@ export interface SessionResponse {
 export type SessionResult =
   | {
       ok: true;
+      /** App cuya cookie de refresh debe escribirse: del ticket en create, del request en refresh/switch. */
+      appCode: string;
       session: SessionResponse;
       refreshToken: string;
       refreshTtlMinutes: number;
     }
-  | { ok: false };
+  | {
+      ok: false;
+      /** Presente cuando la app del fallo se conoce (permite limpiar SOLO su cookie). */
+      appCode?: string;
+    };
 
 /**
  * Clave pública Ed25519 en formato JWK (RFC 7517 / RFC 8037) para el JWKS de
@@ -169,6 +172,9 @@ function invalidResult(code: string, language: string): InvalidResult {
 async function buildSessionResult(
   payload: SessionPayloadOk,
   refreshToken: string,
+  // El payload de los SPs trae appId pero no appCode: viaja como parámetro
+  // desde el dato confiable de cada caso (ticket firmado o cookie leída).
+  appCode: string,
 ): Promise<SessionResult> {
   if (payload.signingKeyEncrypted === null) {
     // Contratación sin clave de firma = error de configuración de la
@@ -191,6 +197,7 @@ async function buildSessionResult(
   );
   return {
     ok: true,
+    appCode,
     session: {
       accessToken,
       expiresIn: payload.accessTokenTtlMinutes * 60,
@@ -346,7 +353,12 @@ export const authController = {
           return invalidStep("ERR_2FA_INVALID_CODE", language);
         }
 
-        const consumed = await repo.spConsumeTicketJti(tx, ticket.userId, jtiHash, ticket.expiresAt);
+        const consumed = await repo.spConsumeTicketJti(
+          tx,
+          ticket.userId,
+          jtiHash,
+          ticket.expiresAt,
+        );
         if (!consumed.ok) {
           if (recoveryCodeBurned) {
             // El burn del recovery code solo puede COMMITear tras validar todo
@@ -435,13 +447,20 @@ export const authController = {
         userAgent: ctx.userAgent,
       });
       if (!payload.ok) {
-        return { ok: false };
+        // Ticket válido ⇒ la app del fallo se conoce (la del propio ticket).
+        return { ok: false, appCode: ticket.appCode };
       }
-      return buildSessionResult(payload, refreshToken);
+      return buildSessionResult(payload, refreshToken, ticket.appCode);
     });
   },
 
-  async refreshSession(refreshToken: string, ctx: AuditContext): Promise<SessionResult> {
+  async refreshSession(
+    refreshToken: string,
+    // Solo seleccionó la cookie leída; por el invariante una-cookie-por-app,
+    // la sesión del token pertenece a esta app.
+    appCode: string,
+    ctx: AuditContext,
+  ): Promise<SessionResult> {
     const newRefreshToken = generateOpaqueToken();
 
     return withTransaction(ctx, async (tx) => {
@@ -453,9 +472,9 @@ export const authController = {
         ctx.userAgent,
       );
       if (!payload.ok) {
-        return { ok: false };
+        return { ok: false, appCode };
       }
-      return buildSessionResult(payload, newRefreshToken);
+      return buildSessionResult(payload, newRefreshToken, appCode);
     });
   },
 
@@ -470,7 +489,7 @@ export const authController = {
     // del par cliente-app de los claims.
     const claims = peekAccessTokenClaims(accessToken);
     if (claims === null) {
-      return { ok: false };
+      return { ok: false, appCode: data.appCode };
     }
 
     const newRefreshToken = generateOpaqueToken();
@@ -478,12 +497,12 @@ export const authController = {
     return withTransaction(ctx, async (tx) => {
       const keyEncrypted = await repo.fnGetSigningKey(tx, claims.customerId, claims.appId);
       if (keyEncrypted === null) {
-        return { ok: false };
+        return { ok: false, appCode: data.appCode };
       }
       const key = getSigningKey(claims.customerId, claims.appId, keyEncrypted);
       const verified = await verifyAccessToken(accessToken, key);
       if (verified === null) {
-        return { ok: false };
+        return { ok: false, appCode: data.appCode };
       }
 
       const payload = await repo.spSwitchSession(
@@ -495,13 +514,13 @@ export const authController = {
         ctx.userAgent,
       );
       if (!payload.ok) {
-        return { ok: false };
+        return { ok: false, appCode: data.appCode };
       }
       if (payload.userId !== verified.sub) {
         // Cookie y access token de usuarios distintos: jamás emitir
         throw new Error("switch: la sesión de la cookie no pertenece al usuario del token");
       }
-      return buildSessionResult(payload, newRefreshToken);
+      return buildSessionResult(payload, newRefreshToken, data.appCode);
     });
   },
 

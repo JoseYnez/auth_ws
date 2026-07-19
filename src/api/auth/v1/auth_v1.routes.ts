@@ -12,8 +12,10 @@ import {
   invitationAcceptV1V,
   jwksResponseV1V,
   loginV1V,
+  logoutQueryV1V,
   passwordResetConfirmV1V,
   passwordResetRequestV1V,
+  refreshSessionV1V,
   sessionResponseV1V,
   switchSessionV1V,
   twoFactorConfirmV1V,
@@ -25,11 +27,38 @@ import {
 // Cookie del refresh token (CLAUDE.md §6): httpOnly + Secure + SameSite=Strict,
 // con Path acotado a los endpoints de sesión — el navegador no la manda a
 // ningún otro sitio. El access token NUNCA va en cookie (memoria del SPA).
-const REFRESH_COOKIE = "auth_refresh";
+//
+// Hay UNA cookie POR APP (`auth_refresh__<appCode>`): apps distintas conviven
+// en el mismo navegador con sesiones (y usuarios) independientes. Invariante:
+// una cookie `auth_refresh__X` solo contiene sesiones de la app X, porque solo
+// el servidor la escribe — con el appCode del ticket firmado en create, o el de
+// la cookie leída en refresh/switch. El appCode que manda el cliente SOLO
+// selecciona qué cookie leer/escribir; la autoridad es la sesión (tripleta).
+const REFRESH_COOKIE_PREFIX = "auth_refresh__";
+// Cookie única pre-multi-app: jamás se lee, solo se limpia (staging).
+const LEGACY_REFRESH_COOKIE = "auth_refresh";
 const REFRESH_COOKIE_PATH = "/auth/sessions";
+const APP_CODE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
 
-function setRefreshCookie(reply: FastifyReply, token: string, ttlMinutes: number): void {
-  reply.setCookie(REFRESH_COOKIE, token, {
+/**
+ * Nombre de la cookie de refresh de una app. El verifier ya garantiza el
+ * charset; esta guardia es defensa en profundidad contra inyección en el
+ * nombre de la cookie si algún día un appCode llegara por otra vía.
+ */
+function refreshCookieName(appCode: string): string {
+  if (!APP_CODE_PATTERN.test(appCode)) {
+    throw new Error("appCode con charset inválido para nombre de cookie");
+  }
+  return `${REFRESH_COOKIE_PREFIX}${appCode}`;
+}
+
+function setRefreshCookie(
+  reply: FastifyReply,
+  appCode: string,
+  token: string,
+  ttlMinutes: number,
+): void {
+  reply.setCookie(refreshCookieName(appCode), token, {
     httpOnly: true,
     secure: config.cookieSecure,
     sameSite: config.cookieSameSite,
@@ -39,12 +68,16 @@ function setRefreshCookie(reply: FastifyReply, token: string, ttlMinutes: number
   });
 }
 
-function clearRefreshCookie(reply: FastifyReply): void {
-  reply.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH });
+function clearRefreshCookie(reply: FastifyReply, appCode: string): void {
+  reply.clearCookie(refreshCookieName(appCode), { path: REFRESH_COOKIE_PATH });
 }
 
-function readRefreshCookie(req: FastifyRequest): string | null {
-  return req.cookies[REFRESH_COOKIE] ?? null;
+function clearLegacyRefreshCookie(reply: FastifyReply): void {
+  reply.clearCookie(LEGACY_REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH });
+}
+
+function readRefreshCookie(req: FastifyRequest, appCode: string): string | null {
+  return req.cookies[refreshCookieName(appCode)] ?? null;
 }
 
 function readBearerToken(req: FastifyRequest): string | null {
@@ -64,19 +97,25 @@ function readBearerToken(req: FastifyRequest): string | null {
  */
 function sendStep(reply: FastifyReply, result: LoginStepResult) {
   const status =
-    result.kind === "invalid" && result.message !== undefined
-      ? result.message.httpStatusCode
-      : 200;
+    result.kind === "invalid" && result.message !== undefined ? result.message.httpStatusCode : 200;
   return reply.code(status).send(result);
 }
 
-/** Mapea el resultado de sesión: 200 + cookie, o 401 opaco + cookie limpia. */
+/**
+ * Mapea el resultado de sesión: 200 + cookie de la app del resultado, o 401
+ * opaco (limpiando la cookie de la app SOLO cuando el fallo tiene app conocida
+ * — nunca se tumba la sesión vigente de otra app).
+ */
 function sendSessionResult(reply: FastifyReply, result: SessionResult) {
   if (!result.ok) {
-    clearRefreshCookie(reply);
+    if (result.appCode !== undefined) {
+      clearRefreshCookie(reply, result.appCode);
+    }
     return reply.code(401).send({ error: "invalid" });
   }
-  setRefreshCookie(reply, result.refreshToken, result.refreshTtlMinutes);
+  setRefreshCookie(reply, result.appCode, result.refreshToken, result.refreshTtlMinutes);
+  // Limpieza de la cookie única pre-multi-app (staging): nunca se lee.
+  clearLegacyRefreshCookie(reply);
   return reply.code(200).send(result.session);
 }
 
@@ -87,7 +126,10 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
 
   app.post(
     "/auth/login",
-    { schema: { body: loginV1V }, preHandler: rateLimit({ tag: "login", max: 10, windowMs: 60_000 }) },
+    {
+      schema: { body: loginV1V },
+      preHandler: rateLimit({ tag: "login", max: 10, windowMs: 60_000 }),
+    },
     async (req, reply) => {
       const result = await authController.login(req.body, buildAuditContext(req));
       return sendStep(reply, result);
@@ -96,7 +138,10 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
 
   app.post(
     "/auth/two-factor",
-    { schema: { body: twoFactorV1V }, preHandler: rateLimit({ tag: "two-factor", max: 10, windowMs: 60_000 }) },
+    {
+      schema: { body: twoFactorV1V },
+      preHandler: rateLimit({ tag: "two-factor", max: 10, windowMs: 60_000 }),
+    },
     async (req, reply) => {
       const result = await authController.twoFactor(req.body, buildAuditContext(req));
       return sendStep(reply, result);
@@ -185,15 +230,21 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
     "/auth/sessions/refresh",
     {
       schema: {
+        body: refreshSessionV1V,
         response: { 200: sessionResponseV1V, 401: invalidResponseV1V },
       },
     },
     async (req, reply) => {
-      const refreshToken = readRefreshCookie(req);
+      const refreshToken = readRefreshCookie(req, req.body.appCode);
       if (refreshToken === null) {
+        clearRefreshCookie(reply, req.body.appCode);
         return reply.code(401).send({ error: "invalid" });
       }
-      const result = await authController.refreshSession(refreshToken, buildAuditContext(req));
+      const result = await authController.refreshSession(
+        refreshToken,
+        req.body.appCode,
+        buildAuditContext(req),
+      );
       return sendSessionResult(reply, result);
     },
   );
@@ -208,8 +259,9 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
     },
     async (req, reply) => {
       const accessToken = readBearerToken(req);
-      const refreshToken = readRefreshCookie(req);
+      const refreshToken = readRefreshCookie(req, req.body.appCode);
       if (accessToken === null || refreshToken === null) {
+        clearRefreshCookie(reply, req.body.appCode);
         return reply.code(401).send({ error: "invalid" });
       }
       const result = await authController.switchSession(
@@ -241,14 +293,21 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
     },
   );
 
-  app.delete("/auth/sessions/current", async (req, reply) => {
-    const refreshToken = readRefreshCookie(req);
-    if (refreshToken !== null) {
-      await authController.revokeSession(refreshToken, buildAuditContext(req));
-    }
-    clearRefreshCookie(reply);
-    return reply.code(204).send();
-  });
+  // DELETE sin body: el appCode viaja por querystring. Idempotente — sin
+  // cookie no hay nada que revocar, pero se limpia igual.
+  app.delete(
+    "/auth/sessions/current",
+    { schema: { querystring: logoutQueryV1V } },
+    async (req, reply) => {
+      const refreshToken = readRefreshCookie(req, req.query.appCode);
+      if (refreshToken !== null) {
+        await authController.revokeSession(refreshToken, buildAuditContext(req));
+      }
+      clearRefreshCookie(reply, req.query.appCode);
+      clearLegacyRefreshCookie(reply);
+      return reply.code(204).send();
+    },
+  );
 
   app.post(
     "/auth/password-reset/request",

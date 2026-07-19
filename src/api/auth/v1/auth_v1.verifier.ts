@@ -4,9 +4,18 @@ import { Verifiers as V } from "structure-verifier";
 // longitud mínima 12, máxima 256 (argon2id no necesita más restricciones).
 const newPasswordV = new V.StringNotNull({ minLength: 12, maxLength: 256 });
 
+// appCode: identifica la app cliente. Charset restringido porque el valor
+// nombra la cookie de refresh (`auth_refresh__<appCode>`): solo token-chars
+// seguros — sin ';', '=', espacios ni caracteres de control.
+const appCodeV = new V.StringNotNull({
+  minLength: 1,
+  maxLength: 64,
+  regex: /^[A-Za-z0-9._-]+$/u,
+});
+
 export const loginV1V = new V.ObjectNotNull(
   {
-    appCode: new V.StringNotNull({ minLength: 1, maxLength: 64 }),
+    appCode: appCodeV,
     identifier: new V.StringNotNull({ minLength: 1, maxLength: 320 }),
     password: new V.StringNotNull({ minLength: 1, maxLength: 256 }),
     deviceIdentifier: new V.StringNotNull({ minLength: 1, maxLength: 128 }),
@@ -40,9 +49,27 @@ export const createSessionV1V = new V.ObjectNotNull(
   { strictMode: true },
 );
 
+// refresh/switch/logout llevan el appCode SOLO para seleccionar qué cookie de
+// refresh leer/escribir (una por app); la autoridad sigue siendo la sesión.
+export const refreshSessionV1V = new V.ObjectNotNull(
+  {
+    appCode: appCodeV,
+  },
+  { strictMode: true },
+);
+
 export const switchSessionV1V = new V.ObjectNotNull(
   {
+    appCode: appCodeV,
     customerId: new V.UUIDNotNull(),
+  },
+  { strictMode: true },
+);
+
+/** DELETE /auth/sessions/current lleva el appCode por querystring (DELETE sin body). */
+export const logoutQueryV1V = new V.ObjectNotNull(
+  {
+    appCode: appCodeV,
   },
   { strictMode: true },
 );

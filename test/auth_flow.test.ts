@@ -64,6 +64,9 @@ const CREDS = {
   deviceName: "vitest",
 };
 
+// Cookie de refresh POR APP: auth_refresh__<appCode> (contrato §2.2).
+const REFRESH_COOKIE = "auth_refresh__admin-app";
+
 let app: FastifyInstance;
 
 // Estado compartido entre los pasos del flujo.
@@ -77,12 +80,13 @@ let accessToken = "";
 function readRefreshCookie(res: Awaited<ReturnType<FastifyInstance["inject"]>>): {
   value: string;
   httpOnly: boolean;
+  path: string | undefined;
 } {
-  const cookie = res.cookies.find((c) => c.name === "auth_refresh");
+  const cookie = res.cookies.find((c) => c.name === REFRESH_COOKIE);
   if (cookie === undefined) {
-    throw new Error("La respuesta no trae cookie auth_refresh");
+    throw new Error(`La respuesta no trae cookie ${REFRESH_COOKIE}`);
   }
-  return { value: cookie.value, httpOnly: cookie.httpOnly === true };
+  return { value: cookie.value, httpOnly: cookie.httpOnly === true, path: cookie.path };
 }
 
 beforeAll(async () => {
@@ -145,6 +149,7 @@ describe("flujo de autenticación (integración, BD real)", () => {
 
     const cookie = readRefreshCookie(res);
     expect(cookie.httpOnly).toBe(true);
+    expect(cookie.path).toBe("/auth/sessions");
     expect(cookie.value.length).toBeGreaterThan(0);
 
     refreshCookie = cookie.value;
@@ -174,7 +179,8 @@ describe("flujo de autenticación (integración, BD real)", () => {
     const res = await app.inject({
       method: "POST",
       url: "/auth/sessions/refresh",
-      cookies: { auth_refresh: refreshCookie },
+      cookies: { [REFRESH_COOKIE]: refreshCookie },
+      payload: { appCode: "admin-app" },
     });
 
     expect(res.statusCode).toBe(200);
@@ -196,8 +202,8 @@ describe("flujo de autenticación (integración, BD real)", () => {
       method: "POST",
       url: "/auth/sessions/switch",
       headers: { authorization: `Bearer ${accessToken}` },
-      cookies: { auth_refresh: refreshCookie },
-      payload: { customerId: demoId },
+      cookies: { [REFRESH_COOKIE]: refreshCookie },
+      payload: { appCode: "admin-app", customerId: demoId },
     });
 
     expect(res.statusCode).toBe(200);
@@ -214,11 +220,94 @@ describe("flujo de autenticación (integración, BD real)", () => {
   it("6. logout (DELETE /auth/sessions/current) responde 204", async () => {
     const res = await app.inject({
       method: "DELETE",
-      url: "/auth/sessions/current",
-      cookies: { auth_refresh: refreshCookie },
+      url: "/auth/sessions/current?appCode=admin-app",
+      cookies: { [REFRESH_COOKIE]: refreshCookie },
     });
 
     expect(res.statusCode).toBe(204);
+  });
+
+  it("6b. refresh sin cookie de la app responde 401 opaco y limpia esa cookie", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/auth/sessions/refresh",
+      payload: { appCode: "admin-app" },
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: "invalid" });
+    // Set-Cookie de borrado de la cookie de ESTA app.
+    const cleared = res.cookies.find((c) => c.name === REFRESH_COOKIE);
+    expect(cleared?.value).toBe("");
+  });
+
+  it("6c. appCode con charset inválido para nombre de cookie responde 400 (verifier)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/auth/sessions/refresh",
+      payload: { appCode: "bad code;" },
+    });
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("6d. la cookie legacy auth_refresh jamás se lee: refresh con solo la legacy responde 401", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/auth/sessions/refresh",
+      cookies: { auth_refresh: refreshCookie },
+      payload: { appCode: "admin-app" },
+    });
+
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("6e. aislamiento entre apps: pedir otra app no toca la cookie de admin-app", async () => {
+    // Nueva sesión de admin-app (la del paso 6 quedó revocada).
+    const login = await app.inject({
+      method: "POST",
+      url: "/auth/login",
+      payload: { ...CREDS, deviceIdentifier: "vitest-isolation" },
+    });
+    expect(login.statusCode).toBe(200);
+    const session = await app.inject({
+      method: "POST",
+      url: "/auth/sessions",
+      payload: { ticket: login.json().ticket, customerId: platformId },
+    });
+    expect(session.statusCode).toBe(200);
+    const adminCookie = readRefreshCookie(session).value;
+
+    // Refresh pidiendo OTRA app con la cookie de admin-app presente en el
+    // navegador: no hay cookie auth_refresh__other-app → 401, sin tocar la
+    // sesión de admin-app.
+    const other = await app.inject({
+      method: "POST",
+      url: "/auth/sessions/refresh",
+      cookies: { [REFRESH_COOKIE]: adminCookie },
+      payload: { appCode: "other-app" },
+    });
+    expect(other.statusCode).toBe(401);
+    expect(other.cookies.find((c) => c.name === REFRESH_COOKIE)).toBeUndefined();
+
+    // La sesión de admin-app sigue viva y refrescable.
+    const still = await app.inject({
+      method: "POST",
+      url: "/auth/sessions/refresh",
+      cookies: { [REFRESH_COOKIE]: adminCookie },
+      payload: { appCode: "admin-app" },
+    });
+    expect(still.statusCode).toBe(200);
+    expect(still.json().tenant.name).toBe("platform");
+
+    // Limpieza: revocar esta sesión para no dejar estado extra.
+    const rotated = readRefreshCookie(still).value;
+    const bye = await app.inject({
+      method: "DELETE",
+      url: "/auth/sessions/current?appCode=admin-app",
+      cookies: { [REFRESH_COOKIE]: rotated },
+    });
+    expect(bye.statusCode).toBe(204);
   });
 
   it("7. opacidad: password incorrecto y usuario inexistente son indistinguibles", async () => {

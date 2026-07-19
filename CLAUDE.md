@@ -248,7 +248,7 @@ Dónde acaba cada cosa:
 | Token | Forma | Reglas |
 |---|---|---|
 | **Access** | JWT, TTL por cascada §1.3 | Claims: `sub` (user_id), `acu` (app_customer_user_id), `customer_id`, `app_id`, `sid` (`app_customer_user_sessions.id`), `iat`, `exp`. Firmado **siempre con Ed25519** con la clave del par cliente-app (`customer_apps.access_token_signing_key_encrypted`, descifrada aquí). La **privada nunca sale de `auth_ws`** (único firmador); la **pública** se publica como **JWKS** (`GET /auth/.well-known/keys`, formato JWK) para que cualquier resource server valide localmente y **no pueda emitir** (decisión #18). **No se usa HS256** (simétrica = capacidad de forjar). `sid` deja a los resource servers poblar `audit.event_log.app_session_id` (vía GUC `audit.user_session`) sin tocar BD — atribución de auditoría, no enforcement de revocación; estable entre refreshes de la misma sesión, cambia en `switch` |
-| **Refresh** | Opaco, 256 bits CSPRNG, base64url | A BD viaja **solo** `sha256(token)`. Rotación encadenada vía `previous_session_token_hash`. Reuso de hash rotado = robo → revocar cadena. Transporte: cookie `httpOnly; Secure; SameSite=Strict; Path=/auth/sessions` |
+| **Refresh** | Opaco, 256 bits CSPRNG, base64url | A BD viaja **solo** `sha256(token)`. Rotación encadenada vía `previous_session_token_hash`. Reuso de hash rotado = robo → revocar cadena. Transporte: cookie **por app** `auth_refresh__<appCode>` (`httpOnly; Secure; SameSite=Strict; Path=/auth/sessions`) — apps distintas conviven en el mismo navegador con sesiones independientes. Invariante: una cookie `auth_refresh__X` solo contiene sesiones de la app X, porque solo el servidor la escribe (con el appCode del **ticket** en create, o el de la cookie leída en refresh/switch); el `appCode` que manda el cliente SOLO selecciona qué cookie usar. La cookie legacy `auth_refresh` (única, pre-multi-app) jamás se lee y se limpia en toda respuesta de sesión exitosa y en logout |
 | **Ticket** | JWT ~5 min, firmado con clave **de plataforma** (`PLATFORM_TICKET_KEY`, no de tenant) | Claims: `sub`, `app_id`, `purpose` (`tenants` \| `two-factor` \| `change-password`), `jti`. Un solo canje: el SP de canje registra/verifica el `jti`. Código 2FA incorrecto **no** invalida el ticket |
 
 El descifrado de `*_encrypted` (claves de firma, secretos TOTP) ocurre
@@ -293,13 +293,17 @@ por `customer_app_id`. Las claves descifradas jamás se loggean ni serializan.
 | `POST /auth/two-factor` | `{ ticket, code }` | mismas variantes; `invalid` según catálogo: 400 código incorrecto (ticket sigue vivo) · 401 ticket inválido/expirado. `code` acepta TOTP (6 dígitos) o código de recuperación |
 | `POST /auth/change-password` | `{ ticket, newPassword }` | mismas variantes y estatus: tras el cambio sigue el flujo (`two-factor` si el usuario tiene 2FA, si no `tenants`) |
 | `POST /auth/sessions` | `{ ticket, customerId }` | 200 `{ accessToken, expiresIn, user: {id, name(alias), email}, tenant, tenants, permissions: string[] }` + cookie refresh · 401 `{ error: 'invalid' }` (opaco) |
-| `POST /auth/sessions/refresh` | — (cookie) | igual que crear sesión (permisos refrescados) |
-| `POST /auth/sessions/switch` | `{ customerId }` (access vigente) | igual que crear sesión, en la nueva empresa |
+| `POST /auth/sessions/refresh` | `{ appCode }` (+ cookie `auth_refresh__<appCode>`) | igual que crear sesión (permisos refrescados). El `appCode` solo selecciona la cookie; la sesión emitida es la del token |
+| `POST /auth/sessions/switch` | `{ appCode, customerId }` (access vigente) | igual que crear sesión, en la nueva empresa |
 | `POST /auth/sessions/verify` | — (access en `Authorization: Bearer`) | 200 SIEMPRE `{ valid, claims }` — introspección de prueba (firma + vigencia + issuer), no frontera de seguridad |
-| `DELETE /auth/sessions/current` | — | 204; revoca (`inactive` + `revoked_at`) |
+| `DELETE /auth/sessions/current` | `?appCode=` (querystring; DELETE sin body) | 204; revoca (`inactive` + `revoked_at`). Idempotente |
 | `POST /auth/password-reset/request` | `{ identifier }` | 202 siempre |
 | `POST /auth/password-reset/confirm` | `{ token, newPassword }` | 204; revoca sesiones del usuario |
 | `GET /auth/.well-known/keys` | — | **JWKS** (RFC 7517): claves públicas Ed25519 en formato JWK (`kty`/`crv`/`x`/`kid`/`alg`/`use` + `appCode`), cacheable |
+
+`appCode` cumple `^[A-Za-z0-9._-]{1,64}$` (400 de validación si no): el valor
+nombra la cookie de refresh y el charset se restringe en el verifier (con
+guardia adicional en `refreshCookieName`).
 
 Cualquier cambio aquí debe reflejarse en §2.2 del CLAUDE.md raíz y en
 `base_project/src/app/core/auth/data/auth.gateway.ts` (y viceversa).
