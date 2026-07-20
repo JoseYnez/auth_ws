@@ -860,6 +860,41 @@ export const authController = {
     });
   },
 
+  /**
+   * Permisos efectivos FRESCOS de la sesión del access token (decisión #22:
+   * auth_ws es la fuente de verdad operativa de permisos — la consumen el
+   * front para la validación visual y los resource servers para autorizar
+   * endpoints). Verificación real del token (misma que `switch`) + validez de
+   * la sesión en BD: un token criptográficamente válido de una sesión ya
+   * revocada NO obtiene permisos. `null` → 401 opaco.
+   */
+  async getSessionPermissions(
+    accessToken: string,
+    ctx: AuditContext,
+  ): Promise<{ permissions: string[] } | null> {
+    const peeked = peekAccessTokenClaims(accessToken);
+    if (peeked === null) {
+      return null;
+    }
+
+    return withTransaction(ctx, async (tx) => {
+      const keyEncrypted = await repo.fnGetSigningKey(tx, peeked.customerId, peeked.appId);
+      if (keyEncrypted === null) {
+        return null;
+      }
+      const key = getSigningKey(peeked.customerId, peeked.appId, keyEncrypted);
+      const verified: VerifiedAccessToken | null = await verifyAccessToken(accessToken, key);
+      if (verified === null) {
+        return null;
+      }
+      const permissions = await repo.fnGetSessionPermissions(tx, verified.sid);
+      if (permissions === null) {
+        return null;
+      }
+      return { permissions };
+    });
+  },
+
   async requestPasswordReset(
     data: InferType<typeof passwordResetRequestV1V>,
     ctx: AuditContext,

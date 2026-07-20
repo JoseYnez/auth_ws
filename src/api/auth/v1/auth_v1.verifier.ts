@@ -177,6 +177,13 @@ export const invalidResponseV1V = new V.ObjectNotNull({
   error: new V.StringNotNull(),
 });
 
+// Permisos efectivos frescos de la sesión (GET /auth/sessions/current/permissions,
+// decisión #22). Mismo formato que `sessionResponseV1V.permissions`: lista plana
+// de códigos canónicos.
+export const sessionPermissionsResponseV1V = new V.ObjectNotNull({
+  permissions: new V.ArrayNotNull(new V.StringNotNull()),
+});
+
 // JWKS público (GET /auth/.well-known/keys): claves públicas Ed25519 en formato
 // JWK (RFC 7517 / 8037). Se declara la respuesta para no filtrar nunca material
 // privado; `x` es la clave pública (no secreta). `appCode` es un miembro extra.

@@ -16,6 +16,7 @@ import {
   passwordResetConfirmV1V,
   passwordResetRequestV1V,
   refreshSessionV1V,
+  sessionPermissionsResponseV1V,
   sessionResponseV1V,
   switchSessionV1V,
   twoFactorConfirmV1V,
@@ -333,6 +334,33 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
         buildAuditContext(req),
       );
       return sendSessionResult(reply, result);
+    },
+  );
+
+  // Permisos efectivos FRESCOS de la sesión del access token (decisión #22:
+  // auth_ws es la fuente de verdad operativa de permisos). A diferencia de
+  // /verify, SÍ es frontera: verificación real de firma + validez de la sesión
+  // en BD (una sesión revocada no obtiene permisos aunque el JWT siga vigente).
+  // Lo consumen el front (re-sincronizar la validación visual sin esperar al
+  // refresh) y los resource servers (autorización de endpoints, con caché).
+  app.get(
+    "/auth/sessions/current/permissions",
+    {
+      schema: { response: { 200: sessionPermissionsResponseV1V, 401: invalidResponseV1V } },
+    },
+    async (req, reply) => {
+      const accessToken = readBearerToken(req);
+      if (accessToken === null) {
+        return reply.code(401).send({ error: "invalid" });
+      }
+      const result = await authController.getSessionPermissions(
+        accessToken,
+        buildAuditContext(req),
+      );
+      if (result === null) {
+        return reply.code(401).send({ error: "invalid" });
+      }
+      return reply.code(200).send(result);
     },
   );
 

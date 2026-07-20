@@ -300,6 +300,7 @@ por `customer_app_id`. Las claves descifradas jamás se loggean ni serializan.
 | `POST /auth/sessions/refresh` | `{ appCode }` (+ cookie `auth_refresh__<appCode>`) | igual que crear sesión (permisos refrescados). El `appCode` solo selecciona la cookie; la sesión emitida es la del token |
 | `POST /auth/sessions/switch` | `{ appCode, customerId }` (access vigente) | igual que crear sesión, en la nueva empresa |
 | `POST /auth/sessions/verify` | — (access en `Authorization: Bearer`) | 200 SIEMPRE `{ valid, claims }` — introspección de prueba (firma + vigencia + issuer), no frontera de seguridad |
+| `GET /auth/sessions/current/permissions` | — (access en `Authorization: Bearer`) | 200 `{ permissions: string[] }` — permisos efectivos **FRESCOS** de la sesión (decisión #22 del raíz): verificación real de firma **y** validez de la sesión en BD (`auth.fn_get_session_permissions(sid)`; sesión revocada = 401 aunque el JWT siga vigente) · 401 opaco `{ error: 'invalid' }`. Lo consumen el front (re-sync visual) y los resource servers (autorización con caché) |
 | `DELETE /auth/sessions/current` | `?appCode=` (querystring; DELETE sin body) | 204; revoca (`inactive` + `revoked_at`). Idempotente |
 | `POST /auth/password-reset/request` | `{ identifier }` | 202 siempre |
 | `POST /auth/password-reset/confirm` | `{ token, newPassword }` | 204; revoca sesiones del usuario |

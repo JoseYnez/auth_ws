@@ -511,6 +511,7 @@ automáticamente.
 | `POST /auth/sessions/refresh` | `{ appCode }` + cookie de esa app | igual que crear sesión (permisos refrescados) |
 | `POST /auth/sessions/switch` | `{ appCode, customerId }` + access Bearer + cookie | igual, en la nueva empresa |
 | `POST /auth/sessions/verify` | — (Bearer) | 200 SIEMPRE `{ valid, claims }` — introspección de prueba, no frontera de seguridad |
+| `GET /auth/sessions/current/permissions` | — (Bearer) | 200 `{ permissions[] }` — permisos frescos de la sesión (firma + sesión viva en BD; decisión #22) · 401 opaco |
 | `DELETE /auth/sessions/current` | `?appCode=` (querystring) | 204; idempotente |
 | `POST /auth/password-reset/request` | `{ identifier }` | **202 siempre** (opaco) |
 | `POST /auth/password-reset/confirm` | `{ token, newPassword }` | 204; revoca todas las sesiones |
@@ -753,7 +754,7 @@ i18n, JWKS y el aislamiento de cookies por app.
 | Consumidor | Integración |
 |---|---|
 | `admin_app` (SPA consola) | `HttpAuthGateway` — `APP_CODE='admin-app'` en login/refresh/switch/logout; access token en memoria; restore por cookie al arrancar |
-| `admin_ws` (API consola) | Resource server: valida el access **localmente** (JWKS cacheado, exige `appCode` propio en la clave) y autoriza con `fn_has_permission`. No emite tokens |
+| `admin_ws` (API consola) | Resource server: valida el access **localmente** (JWKS cacheado, exige `appCode` propio en la clave) y autoriza consultando `GET /auth/sessions/current/permissions` (caché por `sid`, degradación al resolver local `fn_has_permission` — decisión #22). No emite tokens |
 | `residguard_app` | `SessionRepositoryHttp` — `AUTH_APP_CODE='residguard-app'` en login/refresh/logout (sin switch) |
 | `auth_app` | Front de flujos de cuenta (reset de contraseña, invitación + enrolamiento 2FA) |
 | `base_project` (ERP) | Espeja el contrato en `auth.gateway.ts` (gateway simulado hoy); su catálogo de permisos está pendiente |

@@ -393,6 +393,19 @@ export const authRepository = {
     return (result.rows[0]?.key as string | null) ?? null;
   },
 
+  /**
+   * Permisos efectivos FRESCOS de la sesión (decisión #22). `null` = sesión
+   * inválida (revocada/expirada/inexistente); con sesión válida, el array de
+   * códigos (posiblemente vacío) — misma resolución que embebe la respuesta
+   * de crear/refresh/switch.
+   */
+  async fnGetSessionPermissions(tx: TxClient, sessionId: string): Promise<string[] | null> {
+    const result = await tx.query("SELECT auth.fn_get_session_permissions($1) AS permissions", [
+      sessionId,
+    ]);
+    return (result.rows[0]?.permissions as string[] | null) ?? null;
+  },
+
   async fnListSigningKeys(tx: TxClient): Promise<
     Array<{
       customerId: string;

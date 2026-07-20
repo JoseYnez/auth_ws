@@ -281,6 +281,36 @@ describe("flujo de autenticación (integración, BD real)", () => {
     expect(body.claims.customerId).toBe(platformId);
   });
 
+  it("3.b permisos frescos de la sesión con Bearer válido; 401 opaco sin token o con token basura", async () => {
+    // Fuente de verdad operativa de permisos (decisión #22): mismos 26 códigos
+    // que embebe la respuesta de sesión, ahora consultables sin refresh.
+    const res = await app.inject({
+      method: "GET",
+      url: "/auth/sessions/current/permissions",
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(Array.isArray(body.permissions)).toBe(true);
+    expect(body.permissions).toHaveLength(26);
+
+    const sinToken = await app.inject({
+      method: "GET",
+      url: "/auth/sessions/current/permissions",
+    });
+    expect(sinToken.statusCode).toBe(401);
+    expect(sinToken.json()).toEqual({ error: "invalid" });
+
+    const basura = await app.inject({
+      method: "GET",
+      url: "/auth/sessions/current/permissions",
+      headers: { authorization: "Bearer no-es-un-jwt" },
+    });
+    expect(basura.statusCode).toBe(401);
+    expect(basura.json()).toEqual({ error: "invalid" });
+  });
+
   it("4. refresh con la cookie rota el token y mantiene 26 permisos", async () => {
     const res = await app.inject({
       method: "POST",
