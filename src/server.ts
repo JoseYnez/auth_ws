@@ -19,8 +19,8 @@ import { getMailer } from "./core/mailer/mailer";
  */
 export async function buildApp(): Promise<FastifyInstance> {
   // Instancia el mailer AL BOOT (no en el primer correo): con
-  // MAIL_TRANSPORT=smtp una configuración inválida debe tumbar el arranque
-  // (fail-fast §9) — los tokens de reset/invitación viajan solo por email.
+  // MAIL_TRANSPORT=smtp-service una configuración inválida debe tumbar el
+  // arranque (fail-fast §9) — los tokens de reset/invitación viajan solo por email.
   getMailer();
   // En desarrollo usamos pino-pretty para que la línea de acceso salga limpia
   // (sin el envoltorio JSON). En producción se mantiene JSON para agregadores.

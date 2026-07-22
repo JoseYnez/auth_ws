@@ -328,7 +328,10 @@ proceso **no arranca**.
 | `PORT` / `HOST` | Servicio (default 3001) |
 | `COOKIE_DOMAIN` | Dominio de la cookie de refresh (opcional) |
 | `COOKIE_SECURE` | default `true`; `false` SOLO en desarrollo local sin HTTPS |
-| `OTP_SENDER_TRANSPORT` | Envío del OTP 2FA por SMS/WhatsApp: `console` (default dev — loggea el código) · `twilio` (real; exige TWILIO_*, fail-fast al boot) · `memory` (outbox para tests). El canal email usa el mailer |
+| `MAIL_TRANSPORT` | Correo transaccional: `console` (default dev — loggea el correo) · `smtp-service` (real — encola en el microservicio **smtp-service** de `notificacion_project` vía `POST /v1/emails` con header `X-Api-Key`; exige `SMTP_SERVICE_*`, fail-fast al boot) · `memory` (outbox para tests). auth_ws no habla SMTP directo; el remitente lo resuelve el smtp-service |
+| `SMTP_SERVICE_URL` / `SMTP_SERVICE_API_KEY` | Base URL (sin barra final) y api key del cliente en smtp-service (solo con transporte `smtp-service`) |
+| `SMTP_SERVICE_ACCOUNT_CODE` | Cuenta SMTP del cliente en smtp-service (opcional; vacío = cuenta default) |
+| `OTP_SENDER_TRANSPORT` | Envío del OTP 2FA por SMS/WhatsApp: `console` (default dev — loggea el código) · `twilio` (real; exige TWILIO_*, fail-fast al boot) · `memory` (outbox para tests). El canal email usa el mailer (`MAIL_TRANSPORT`) |
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | Credenciales Twilio (solo con transporte `twilio`) |
 | `TWILIO_SMS_FROM` / `TWILIO_WHATSAPP_FROM` | Remitentes en E.164 (el prefijo `whatsapp:` lo añade el transporte) |
 | `LOG_LEVEL` | pino |

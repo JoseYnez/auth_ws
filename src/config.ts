@@ -26,26 +26,23 @@ const envV = new V.ObjectNotNull({
   // Base pública del auth_app (donde viven /reset y /invitation) para armar los
   // enlaces de los correos. Sin barra final.
   AUTH_APP_BASE_URL: new V.StringNotNull({ defaultValue: "http://localhost:4200" }),
-  // Remitente de los correos transaccionales.
-  MAIL_FROM: new V.StringNotNull({ defaultValue: "no-reply@localhost" }),
   // Transporte de correo: 'console' registra el correo en el log (dev/fallback,
-  // default); 'smtp' envía de verdad vía nodemailer (exige SMTP_HOST — se
-  // valida más abajo, fail-fast al boot).
+  // default); 'smtp-service' delega el envío en el microservicio smtp-service
+  // (notificacion_project) vía POST /v1/emails (exige SMTP_SERVICE_URL y
+  // SMTP_SERVICE_API_KEY — se valida más abajo, fail-fast al boot); el
+  // remitente lo decide el propio smtp-service según la cuenta configurada.
   // 'memory' captura los correos en un outbox (solo tests de integración).
   MAIL_TRANSPORT: new V.StringNotNull({
     defaultValue: "console",
-    in: ["console", "smtp", "memory"],
+    in: ["console", "smtp-service", "memory"],
   }),
-  // Servidor SMTP (solo con MAIL_TRANSPORT=smtp). SMTP_SECURE=true = TLS
-  // implícito (puerto 465); false = claro/STARTTLS (587/25, nodemailer
-  // negocia STARTTLS si el servidor lo ofrece).
-  SMTP_HOST: new V.String({ maxLength: 255 }),
-  SMTP_PORT: new V.NumberNotNull({ defaultValue: 587, min: 1, max: 65535 }),
-  SMTP_SECURE: new V.BooleanNotNull({ defaultValue: false }),
-  // Credenciales SMTP opcionales (relays internos sin auth): si se define una,
-  // la otra es obligatoria (se valida más abajo).
-  SMTP_USER: new V.String({ maxLength: 320 }),
-  SMTP_PASS: new V.String({ maxLength: 512 }),
+  // smtp-service (solo con MAIL_TRANSPORT=smtp-service): base URL del servicio
+  // (sin barra final) y api key del cliente (viaja en el header X-Api-Key).
+  SMTP_SERVICE_URL: new V.String({ maxLength: 512 }),
+  SMTP_SERVICE_API_KEY: new V.String({ maxLength: 255 }),
+  // Cuenta SMTP del cliente en smtp-service (campo account_code, opcional:
+  // vacío = la cuenta default del cliente).
+  SMTP_SERVICE_ACCOUNT_CODE: new V.String({ maxLength: 255 }),
   // Transporte del código OTP 2FA por SMS/WhatsApp: 'console' loggea el código
   // (dev/fallback, default); 'twilio' envía de verdad (exige TWILIO_* — se
   // valida más abajo, fail-fast al boot); 'memory' captura en un outbox (tests).
@@ -94,18 +91,21 @@ if (env.PLATFORM_TICKET_KEY.length < 32) {
   process.exit(1);
 }
 
-// Fail-fast del transporte SMTP (§9): con MAIL_TRANSPORT=smtp la configuración
-// incompleta debe impedir el arranque, no descubrirse en el primer correo
-// (los tokens de reset/invitación viajan SOLO por email).
-if (env.MAIL_TRANSPORT === "smtp") {
-  if (env.SMTP_HOST === null || env.SMTP_HOST.trim().length === 0) {
-    console.error("MAIL_TRANSPORT=smtp exige SMTP_HOST");
-    process.exit(1);
+// Fail-fast del transporte de correo (§9): con MAIL_TRANSPORT=smtp-service la
+// configuración incompleta debe impedir el arranque, no descubrirse en el
+// primer correo (los tokens de reset/invitación viajan SOLO por email).
+if (env.MAIL_TRANSPORT === "smtp-service") {
+  const missing: string[] = [];
+  for (const [name, value] of [
+    ["SMTP_SERVICE_URL", env.SMTP_SERVICE_URL],
+    ["SMTP_SERVICE_API_KEY", env.SMTP_SERVICE_API_KEY],
+  ] as const) {
+    if (value === null || value.trim().length === 0) {
+      missing.push(name);
+    }
   }
-  const hasUser = env.SMTP_USER !== null && env.SMTP_USER.length > 0;
-  const hasPass = env.SMTP_PASS !== null && env.SMTP_PASS.length > 0;
-  if (hasUser !== hasPass) {
-    console.error("SMTP_USER y SMTP_PASS deben definirse juntos (o ninguno de los dos)");
+  if (missing.length > 0) {
+    console.error(`MAIL_TRANSPORT=smtp-service exige: ${missing.join(", ")}`);
     process.exit(1);
   }
 }
@@ -201,13 +201,14 @@ export const config = {
     .map((o) => o.trim())
     .filter((o) => o.length > 0),
   authAppBaseUrl: env.AUTH_APP_BASE_URL.replace(/\/+$/u, ""),
-  mailFrom: env.MAIL_FROM,
-  mailTransport: env.MAIL_TRANSPORT as "console" | "smtp" | "memory",
-  smtpHost: env.SMTP_HOST,
-  smtpPort: env.SMTP_PORT,
-  smtpSecure: env.SMTP_SECURE,
-  smtpUser: env.SMTP_USER,
-  smtpPass: env.SMTP_PASS,
+  mailTransport: env.MAIL_TRANSPORT as "console" | "smtp-service" | "memory",
+  smtpServiceUrl:
+    env.SMTP_SERVICE_URL === null ? null : env.SMTP_SERVICE_URL.trim().replace(/\/+$/u, ""),
+  smtpServiceApiKey: env.SMTP_SERVICE_API_KEY,
+  smtpServiceAccountCode:
+    env.SMTP_SERVICE_ACCOUNT_CODE !== null && env.SMTP_SERVICE_ACCOUNT_CODE.trim().length > 0
+      ? env.SMTP_SERVICE_ACCOUNT_CODE.trim()
+      : null,
   otpSenderTransport: env.OTP_SENDER_TRANSPORT as "console" | "twilio" | "memory",
   twilioAccountSid: env.TWILIO_ACCOUNT_SID,
   twilioAuthToken: env.TWILIO_AUTH_TOKEN,

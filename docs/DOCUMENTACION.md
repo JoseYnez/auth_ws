@@ -710,7 +710,7 @@ onboarding (staff plataforma, vía `admin_ws`), y ese admin invita al resto.
 | `COOKIE_DOMAIN`, `COOKIE_SECURE`, `COOKIE_SAMESITE` | Cookie de refresh (`strict` default; `none` solo para SPA en otro origen) |
 | `CORS_ORIGINS` | Lista blanca separada por comas (vacío = sin CORS) |
 | `AUTH_APP_BASE_URL` | Base de los enlaces de email (reset/invitación) |
-| `MAIL_TRANSPORT` (`console`/`smtp`/`memory`) + `MAIL_FROM`, `SMTP_*` | Correo transaccional (fail-fast si smtp incompleto; `memory` = outbox de tests) |
+| `MAIL_TRANSPORT` (`console`/`smtp-service`/`memory`) + `SMTP_SERVICE_URL`, `SMTP_SERVICE_API_KEY`, `SMTP_SERVICE_ACCOUNT_CODE?` | Correo transaccional: `smtp-service` encola en el microservicio smtp-service (`POST /v1/emails`, header `X-Api-Key`; el remitente lo resuelve el servicio) — fail-fast si falta URL/api key; `memory` = outbox de tests |
 | `OTP_SENDER_TRANSPORT` (`console`/`twilio`/`memory`) + `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_SMS_FROM`, `TWILIO_WHATSAPP_FROM` | Envío del OTP 2FA por SMS/WhatsApp (fail-fast si twilio incompleto) |
 | `RATE_LIMIT_DISABLED` | Solo tests/desarrollo |
 | `LOG_LEVEL` | pino |

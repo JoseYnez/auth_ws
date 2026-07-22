@@ -1,11 +1,12 @@
-import nodemailer, { type Transporter } from "nodemailer";
-import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import { config } from "../../config";
 
 // Capa de correo transaccional (CLAUDE.md §4 / Fase 2). Abstracción mínima con
 // dos transportes: CONSOLA (default — registra el correo en el log, para
-// desarrollo y fallback) y SMTP real vía nodemailer (MAIL_TRANSPORT=smtp; su
-// configuración se valida fail-fast al boot en config.ts).
+// desarrollo y fallback) y el smtp-service de notificacion_project
+// (MAIL_TRANSPORT=smtp-service): auth_ws NO habla SMTP directo — encola el
+// correo en ese microservicio (POST /v1/emails, auth por X-Api-Key) y él se
+// encarga del despacho real (reintentos, cuentas SMTP, remitente). Su
+// configuración se valida fail-fast al boot en config.ts.
 //
 // El valor CRUDO de los tokens viaja SOLO por este canal; jamás se persiste ni
 // se loggea fuera del cuerpo del correo (la BD guarda solo su hash).
@@ -24,50 +25,63 @@ export interface Mailer {
 class ConsoleMailer implements Mailer {
   async send(message: EmailMessage): Promise<void> {
     console.info(
-      `[mailer:console] from=${config.mailFrom} to=${message.to} subject="${message.subject}"\n${message.text}`,
+      `[mailer:console] to=${message.to} subject="${message.subject}"\n${message.text}`,
     );
   }
 }
 
 /**
- * Transporte SMTP real (nodemailer). La configuración viene validada del boot
- * (config.ts exige SMTP_HOST y credenciales completas o ninguna cuando
- * MAIL_TRANSPORT=smtp); aquí solo se re-verifica como cinturón de seguridad.
+ * Transporte real: delega el envío en el smtp-service (notificacion_project).
+ * El correo se ENCOLA (`POST /v1/emails`, contrato snake_case) y el servicio
+ * despacha con sus cuentas SMTP — el remitente lo resuelve él (por
+ * `account_code` o la cuenta default del cliente de la api key). La
+ * configuración viene validada del boot (config.ts exige SMTP_SERVICE_URL y
+ * SMTP_SERVICE_API_KEY cuando MAIL_TRANSPORT=smtp-service); aquí solo se
+ * re-verifica como cinturón de seguridad.
  */
-class SmtpMailer implements Mailer {
-  private readonly transporter: Transporter;
+class SmtpServiceMailer implements Mailer {
+  private readonly baseUrl: string;
+  private readonly apiKey: string;
 
   constructor() {
-    const host = config.smtpHost;
-    if (host === null || host.trim().length === 0) {
-      // No debería alcanzarse: config.ts aborta el boot sin SMTP_HOST.
-      throw new Error("MAIL_TRANSPORT=smtp exige SMTP_HOST");
+    const url = config.smtpServiceUrl;
+    const apiKey = config.smtpServiceApiKey;
+    if (url === null || url.length === 0 || apiKey === null || apiKey.length === 0) {
+      // No debería alcanzarse: config.ts aborta el boot sin estas variables.
+      throw new Error(
+        "MAIL_TRANSPORT=smtp-service exige SMTP_SERVICE_URL y SMTP_SERVICE_API_KEY",
+      );
     }
-    const auth =
-      config.smtpUser !== null &&
-      config.smtpUser.length > 0 &&
-      config.smtpPass !== null &&
-      config.smtpPass.length > 0
-        ? { user: config.smtpUser, pass: config.smtpPass }
-        : undefined;
-    const options: SMTPTransport.Options = {
-      host,
-      port: config.smtpPort,
-      // true = TLS implícito (465); false = claro/STARTTLS negociado (587/25)
-      secure: config.smtpSecure,
-      ...(auth !== undefined ? { auth } : {}),
-    };
-    this.transporter = nodemailer.createTransport(options);
+    this.baseUrl = url;
+    this.apiKey = apiKey;
   }
 
   async send(message: EmailMessage): Promise<void> {
-    await this.transporter.sendMail({
-      from: config.mailFrom,
-      to: message.to,
-      subject: message.subject,
-      text: message.text,
-      ...(message.html !== undefined ? { html: message.html } : {}),
+    const response = await fetch(`${this.baseUrl}/v1/emails`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": this.apiKey,
+      },
+      body: JSON.stringify({
+        to: [message.to],
+        subject: message.subject,
+        body_text: message.text,
+        ...(message.html !== undefined ? { body_html: message.html } : {}),
+        ...(config.smtpServiceAccountCode !== null
+          ? { account_code: config.smtpServiceAccountCode }
+          : {}),
+      }),
+      signal: AbortSignal.timeout(10_000),
     });
+    // Consumir el cuerpo libera el socket del agente HTTP (undici).
+    await response.arrayBuffer().catch(() => undefined);
+    // 201 = encolado; 200 = deduplicado (no aplica: no mandamos
+    // idempotency_key). Cualquier otro estatus es fallo. Solo se propaga el
+    // estatus: ni el cuerpo de la respuesta ni el del correo tocan el error.
+    if (response.status !== 201 && response.status !== 200) {
+      throw new Error(`smtp-service respondió ${response.status} al encolar el correo`);
+    }
   }
 }
 
@@ -90,8 +104,8 @@ let cached: Mailer | null = null;
 export function getMailer(): Mailer {
   if (cached === null) {
     cached =
-      config.mailTransport === "smtp"
-        ? new SmtpMailer()
+      config.mailTransport === "smtp-service"
+        ? new SmtpServiceMailer()
         : config.mailTransport === "memory"
           ? new MemoryMailer()
           : new ConsoleMailer();
