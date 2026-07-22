@@ -24,8 +24,10 @@ const envV = new V.ObjectNotNull({
   // Vacío = no se permite ningún origen cruzado (mismo origen sigue funcionando).
   CORS_ORIGINS: new V.StringNotNull({ defaultValue: "" }),
   // Base pública del auth_app (donde viven /reset y /invitation) para armar los
-  // enlaces de los correos. Sin barra final.
-  AUTH_APP_BASE_URL: new V.StringNotNull({ defaultValue: "http://localhost:4200" }),
+  // enlaces de los correos. Sin barra final. El default apunta al dev server de
+  // auth_app (puerto 4204, ver auth_app/CLAUDE.md §2); en staging/producción se
+  // fija AUTH_APP_BASE_URL a la URL pública real.
+  AUTH_APP_BASE_URL: new V.StringNotNull({ defaultValue: "http://localhost:4204" }),
   // Transporte de correo: 'console' registra el correo en el log (dev/fallback,
   // default); 'smtp-service' delega el envío en el microservicio smtp-service
   // (notificacion_project) vía POST /v1/emails (exige SMTP_SERVICE_URL y

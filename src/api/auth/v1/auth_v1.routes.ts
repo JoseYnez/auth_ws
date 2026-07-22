@@ -408,7 +408,9 @@ export async function authV1Routes(instance: FastifyInstance): Promise<void> {
     async (req, reply) => {
       const result = await authController.requestPasswordReset(req.body, buildAuditContext(req));
       if (result.issued) {
-        req.log.info("token de password reset emitido (envío de email pendiente de mailer)");
+        // El correo se despacha fire-and-forget tras el commit (ver controller);
+        // aquí solo se registra la emisión sin el token ni el destinatario.
+        req.log.info("password reset emitido; correo de recuperación despachado");
       }
       // 202 SIEMPRE: opaco, sin filtrar existencia de cuentas
       return reply.code(202).send({});
