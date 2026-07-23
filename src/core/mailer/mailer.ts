@@ -139,9 +139,9 @@ export function buildTwoFactorCodeEmail(
   };
 }
 
-/** Correo de recuperación de contraseña con el enlace a auth_app (/reset). */
+/** Correo de recuperación de contraseña con el enlace a auth_app (/password/reset). */
 export function buildPasswordResetEmail(to: string, rawToken: string): EmailMessage {
-  const link = `${config.authAppBaseUrl}/reset?token=${encodeURIComponent(rawToken)}`;
+  const link = `${config.authAppBaseUrl}/password/reset?token=${encodeURIComponent(rawToken)}`;
   return {
     to,
     subject: "Restablece tu contraseña",

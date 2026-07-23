@@ -23,7 +23,7 @@ const envV = new V.ObjectNotNull({
   // Lista blanca de orígenes permitidos para CORS, separados por coma.
   // Vacío = no se permite ningún origen cruzado (mismo origen sigue funcionando).
   CORS_ORIGINS: new V.StringNotNull({ defaultValue: "" }),
-  // Base pública del auth_app (donde viven /reset y /invitation) para armar los
+  // Base pública del auth_app (donde viven /password/reset y /invitation) para armar los
   // enlaces de los correos. Sin barra final. El default apunta al dev server de
   // auth_app (puerto 4204, ver auth_app/CLAUDE.md §2); en staging/producción se
   // fija AUTH_APP_BASE_URL a la URL pública real.
